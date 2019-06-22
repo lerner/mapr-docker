@@ -1,0 +1,18 @@
+#
+# Attunity  License
+# Generated on 16-Mar-2018 22:55:51.3761+02:00 
+# License Comment: MapR (Partner License)
+#
+license_type=EVALUATION_LICENSE
+licensed_to=MapR (Partner License)
+licensed_by=Attunity US
+serial_no=60009784
+expiration_date=2019-03-16
+hosts=
+source_types=Oracle,SQLServer,FileChannel,DB2LUW,DB2zOS,DB2iSeries,SQLMP,MSSQLAIS,Enscribe,Salesforce,SybaseASE,ODBC,RMS,MySQL,Informix,VSAM,IMS,Hadoop,File,SQLMX,Teradata,OdbcWithCdc,PostgreSQL,MongoDB,DB2LUW,SAP,Netezza,Redshift,SapHana
+target_types=MapRStreams,Kafka,HADOOP,ODBC
+features=
+version=6.1
+issue_date=2018-03-16
+checksum=4J3ER-2QCK5-J7QR6-E9RE8
+

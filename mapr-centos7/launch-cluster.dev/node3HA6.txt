@@ -1,0 +1,4 @@
+0 collectd fileserver nodemanager posix-client-basic
+1 collectd fileserver nodemanager posix-client-basic zookeeper cldb webserver hivemetastore   httpfs
+2 collectd fileserver nodemanager posix-client-basic zookeeper cldb webserver hiveserver2     spark-historyserver 
+3 collectd fileserver nodemanager posix-client-basic zookeeper                resourcemanager historyserver opentsdb

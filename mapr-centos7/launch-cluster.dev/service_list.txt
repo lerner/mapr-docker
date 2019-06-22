@@ -1,0 +1,6 @@
+0 fileserver nodemanager 
+1 fileserver nodemanager cldb  
+2 fileserver nodemanager cldb spark-historyserver
+3 fileserver nodemanager zookeeper webserver resourcemanager historyserver
+4 fileserver nodemanager zookeeper webserver hivemetastore
+5 fileserver nodemanager zookeeper hiveserver2

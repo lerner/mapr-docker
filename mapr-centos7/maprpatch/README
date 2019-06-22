@@ -1,0 +1,2 @@
+maprpatch docker image is large b/c MapR keeps backup of patched files to rollback patches
+TBD: This image needs some work to remove backup files to create a reasonably sized image with patches installed

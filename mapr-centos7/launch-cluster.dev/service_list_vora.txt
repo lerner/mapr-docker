@@ -1,0 +1,6 @@
+0 fileserver nodemanager vora-manager-worker
+1 fileserver nodemanager vora-manager-worker cldb  
+2 fileserver nodemanager vora-manager-worker cldb spark-historyserver
+3 fileserver nodemanager vora-manager-worker zookeeper webserver resourcemanager historyserver
+4 fileserver nodemanager vora-manager-worker zookeeper webserver hivemetastore
+5 fileserver nodemanager vora-manager-master zookeeper hiveserver2

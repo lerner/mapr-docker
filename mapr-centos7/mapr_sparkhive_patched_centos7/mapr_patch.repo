@@ -1,0 +1,7 @@
+[MapR_Patch]
+name = MapR Patch
+enabled = 1
+baseurl = http://package.mapr.com/patches/releases/v5.2.0/redhat
+protected = 1
+gpgcheck = 1
+

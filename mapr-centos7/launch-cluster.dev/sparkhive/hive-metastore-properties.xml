@@ -1,0 +1,29 @@
+<property>
+    <name>javax.jdo.option.ConnectionURL</name>
+    <value>jdbc:mariadb://MYSQLHOST:3306/DBNAME?createDatabaseIfNotExist=true</value>
+    <description>JDBC connect string for a JDBC metastore</description>
+</property>
+ <property>
+    <name>javax.jdo.option.ConnectionDriverName</name>
+    <!--
+    <value>org.mysql.jdbc.Driver</value>
+    <value>com.mysql.jdbc.Driver</value>
+    -->
+    <value>org.mariadb.jdbc.Driver</value>
+    <description>Driver class name for a JDBC metastore</description>
+ </property>
+ <property>
+    <name>javax.jdo.option.ConnectionUserName</name>
+    <value>mapr</value>
+    <description>username to use against metastore database</description>
+ </property>
+ <property>
+    <name>javax.jdo.option.ConnectionPassword</name>
+    <value>mapr</value>
+    <description>password to use against metastore database</description>
+ </property>
+ <property>
+   <name>hive.metastore.schema.verification</name>
+   <value>false</value>
+    <description>Prevents Error: MetaException(message:Version information not found in metastore.)</description>
+ </property>

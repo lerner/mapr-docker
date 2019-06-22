@@ -1,0 +1,103 @@
+#
+# create an image for Attunity Replicate.
+# 
+# start with "docker run -it ...". Disconnected ("docker run -it -d ...")
+# is OK as well.
+#
+FROM centos:latest
+ARG user=attunity
+ARG group=attunity
+ARG passwd=admin
+ARG instdir=/opt
+ARG datadir=/data
+#ARG installfile=areplicate-6.1.0-276.x86_64.rpm
+ARG installfile=areplicate-6.1.0-237.x86_64.rpm
+ARG rpmenv="user=$user group=$group pass=$passwd data=$datadir verbose=true debug="
+
+LABEL maintainer="john.neal@attunity.com"
+# copy the Attunity RPM file into /tmp
+ADD $installfile /tmp/$installfile
+# copy the odbc.ini and odbcinst.ini files into /etc. 
+# Note that you will need to create entries as appropriate for your
+# source databases. Note that you need to point to the 64-bit unicode drivers.
+ADD odbc/*odbc*.ini /etc/
+#
+ADD repinit.sh /tmp/
+RUN yum -y update
+# install the unixODBC driver manager
+RUN yum -y install unixODBC
+
+#
+# install Replicate
+#
+# this form is needed to change the install directory
+#RUN export $rpmenv;rpm -ivh --prefix $instdir  /tmp/AttunityReplicate_6_0_0_Linux_X64.rpm
+#
+# I prefer to take the default and use 'yum'
+
+# prepare the data directory
+RUN mkdir $datadir
+RUN chmod 775 $datadir
+RUN export $rpmenv;yum -y install  /tmp/$installfile
+RUN rm /tmp/$installfile
+#
+# install the odbc drivers for your source database(s).
+# note that Attunity wants 64-bit Unicode drivers. If
+# the ODBC drivers you need aren't available via yum/rpm
+# then make this a ADD/COPY step instead.
+#RUN yum -y install mysql-connector-odbc
+ADD odbc/*.so* /usr/lib64/
+# set up environment variables
+ENV INSTDIR=$instdir
+ENV DATADIR=$datadir
+ENV PATH="$instdir/attunity/replicate/bin:$PATH"
+ENV LD_LIBRARY_PATH="$instdir/attunity/replicate/lib:/usr/lib64:$LD_LIBRARY_PATH"
+# configure attunity
+RUN echo "INSTALL DIR = $instdir"
+WORKDIR $instdir/attunity/replicate/bin
+#RUN ./areplicate configure
+#RUN repctl SETSERVERPASSWORD admin
+# install the license
+ADD license.json /tmp/license.json
+RUN repctl -d $datadir importlicense license_file=/tmp/license.json
+RUN rm /tmp/license.json
+RUN chown $user:$group $datadir
+# set password for root and the attunity user
+RUN echo "root:welcome1" | chpasswd
+RUN echo "attunity:welcome1" | chpasswd
+
+# Install MapR ODBC driver 
+COPY MapRHiveODBC-2.1.9.1014-1.el7.x86_64.rpm /tmp/
+
+COPY mapr_mep.repo.template /etc/yum.repos.d/mapr_mep.repo.template
+
+RUN sed -e"s/MAPR_MEP_VER/$MAPR_MEP_VER/" \
+        -e"s/package.mapr.com/mapr-mep-repo/" \
+    /etc/yum.repos.d/mapr_mep.repo.template \
+    > /etc/yum.repos.d/mapr_mep.repo
+
+RUN yum -y install /tmp/MapRHiveODBC-2.1.9.1014-1.el7.x86_64.rpm \
+                   mapr-librdkafka 
+
+RUN echo '[MAPR ODBC]' >> /etc/odbcinst.ini ; \
+    echo 'Driver=/opt/mapr/hiveodbc/lib/64/libmaprhiveodbc64.so' >> /etc/odbcinst.ini; \
+    echo 'DriverManagerEncoding=UTF-16' >> /opt/mapr/hiveodbc/lib/64/mapr.hiveodbc.ini; \
+    echo 'ODBCInstLib=libodbcinst.so' >> /opt/mapr/hiveodbc/lib/64/mapr.hiveodbc.ini; \
+    echo 'LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/lib/jvm/java-1.8.0-openjdk/jre/lib/amd64/server:/opt/mapr/lib:/opt/mapr/hiveodbc/lib/64' >> /opt/attunity/replicate/bin/arep_login.sh; \
+    :
+COPY baseball.tgz /tmp/
+
+
+USER $user:$group
+#
+EXPOSE 3552
+# AML
+# start the Replicate server. Note that the server is started as a
+# system service. arep.ctl returns after starting, and docker will exit
+# at that point. To prevent this, we execute a bash shell after a 
+# successful start of Replicate. This has added benefit of providing a
+# tty we can connect to for troubleshooting. Caution: if you exit the
+# bash shell, the container will terminate.
+CMD ./areplicate start && bash
+
+

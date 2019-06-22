@@ -1,0 +1,8 @@
+securityOpt="-k"
+clusterName=maprkerb
+hostNameBase=kerb
+domainName=ucla.edu
+nodeCount=6
+nodeMemory=8192
+clientCount=0
+clientMemory=1024

@@ -1,0 +1,69 @@
+#
+# create an image for Attunity Replicate.
+# 
+# start with "docker run -it ...". Disconnected ("docker run -it -d ...")
+# is OK as well.
+#
+FROM centos:latest
+ARG user=attunity
+ARG group=attunity
+ARG instdir=/opt
+ARG datadir=/data
+ARG rpmenv="user=$user group=$group verbose=true debug="
+
+LABEL maintainer="john.neal@attunity.com"
+# copy the Attunity RPM file into /tmp
+ADD AttunityReplicate_6_0_0_Linux_X64.rpm /tmp/AttunityReplicate_6_0_0_Linux_X64.rpm
+# copy the odbc.ini and odbcinst.ini files into /etc. 
+# Note that you will need to create entries as appropriate for your
+# source databases. Note that you need to point to the 64-bit unicode drivers.
+ADD odbc/*odbc*.ini /etc/
+#
+ADD repinit.sh /tmp/
+RUN yum -y update
+# install the unixODBC driver manager
+RUN yum -y install unixODBC
+#
+# install Replicate
+#
+# this form is needed to change the install directory
+#RUN export $rpmenv;rpm -ivh --prefix $instdir  /tmp/AttunityReplicate_6_0_0_Linux_X64.rpm
+#
+# I prefer to take the default and use 'yum'
+RUN export $rpmenv;yum -y install  /tmp/AttunityReplicate_6_0_0_Linux_X64.rpm
+#
+# install the odbc drivers for your source database(s).
+# note that Attunity wants 64-bit Unicode drivers. If
+# the ODBC drivers you need aren't available via yum/rpm
+# then make this a ADD/COPY step instead.
+#RUN yum -y install mysql-connector-odbc
+ADD odbc/lib*.so /usr/lib64
+# set up environment variables
+ENV INSTDIR=$instdir
+ENV DATADIR=$datadir
+ENV PATH="$instdir/attunity/replicate/bin:$PATH"
+ENV LD_LIBRARY_PATH="$instdir/attunity/replicate/lib:/usr/lib64:$LD_LIBRARY_PATH"
+# configure attunity
+RUN echo "INSTALL DIR = $instdir"
+WORKDIR $instdir/attunity/replicate/bin
+RUN ./arep.ctl configure
+RUN repctl SETSERVERPASSWORD admin
+RUN mkdir $datadir
+RUN chmod 775 $datadir
+RUN chown $user:$group $datadir
+# set password for root and the attunity user
+RUN echo "root:welcome1" | chpasswd
+RUN echo "attunity:welcome1" | chpasswd
+USER $user:$group
+#
+EXPOSE 3552
+# AML
+COPY baseball.tgz /tmp/
+# start the Replicate server. Note that the server is started as a
+# system service. arep.ctl returns after starting, and docker will exit
+# at that point. To prevent this, we execute a bash shell after a 
+# successful start of Replicate. This has added benefit of providing a
+# tty we can connect to for troubleshooting. Caution: if you exit the
+# bash shell, the container will terminate.
+CMD /tmp/repinit.sh $INSTDIR/attunity/replicate $DATADIR && bash
+

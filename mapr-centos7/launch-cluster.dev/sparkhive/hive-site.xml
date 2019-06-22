@@ -1,0 +1,26 @@
+<configuration>
+ <property>
+    <name>hive.metastore.uris</name>
+    <value>METASTOREURIS</value>
+    <!--
+    <value>thrift://METASTOREHOST:9083</value>
+    -->
+ </property>
+ <property>
+   <name>hive.server2.enable.doAs</name>
+   <value>true</value>
+   <description>Set this property to enable impersonation in Hive Server 2. This is only needed on hiveserver2 nodes.</description>
+ </property>
+ <property>
+    <name>hive.metastore.execute.setugi</name>
+    <value>true</value>
+    <description>Set this property to enable Hive Metastore service impersonation in unsecure mode. In unsecure mode, setting this property to true will cause the metastore to execute DFS operations using the client's reported user and group permissions. Note that this property must be set on both the client and server sides. If the client sets it to true and the server sets it to false, the client setting will be ignored.  </description>
+</property>
+<property>
+<!--
+    <name>datanucleus.autoCreateTables</name>
+-->
+    <name>datanucleus.schema.autoCreateAll</name>
+    <value>True</value>
+  </property>
+</configuration>

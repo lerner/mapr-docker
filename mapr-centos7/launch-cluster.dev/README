@@ -1,0 +1,13 @@
+
+Start a MapR cluster in docker containers on this host using the launch-cluster.sh script.
+
+For help menu:  ./launch-cluster.sh -h 
+
+Sample invocations (use sudo if not running as root):
+
+  sudo ./launch-spark-kerb.sh	# launches a 3 node HA Kerberos spark cluster with docker volume data files for storage pools
+  sudo ./launch-spark-secure.sh	# launches a 12 node secure spark cluster with physical or EBS block devices for storage pools
+  sudo ./launch-spark.sh	# same as above but insecure cluster
+  sudo ./launch-fs.sh		# launches a 6 node HA fileserver cluster with docker volume data files for storage pools
+  sudo ./launch-fs1-sec.sh 	# launches a single node secure cluster with docker volume data file for storage
+

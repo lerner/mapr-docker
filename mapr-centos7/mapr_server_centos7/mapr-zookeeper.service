@@ -1,0 +1,20 @@
+[Unit]
+Description=MapR Technologies, Inc. zookeeper service
+After=rc-local.service
+After=network.target syslog.target
+
+
+[Service]
+ExecStop=/opt/mapr/initscripts/zookeeper stop
+ExecStart=/opt/mapr/initscripts/zookeeper start
+PIDFile=/opt/mapr/zkdata/zookeeper_server.pid 
+Restart=on-failure
+RestartSec=10
+StartLimitBurst=3
+StartLimitInterval=60s
+
+SuccessExitStatus=9 130 143 SIGKILL
+Type=forking
+
+[Install]
+WantedBy=default.target

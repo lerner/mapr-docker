@@ -1,0 +1,7 @@
+[SAP_Vora]
+name = SAP HANA Vora
+enabled = 1
+baseurl = http://REPOSERVER/sapvora
+protected = 0
+gpgcheck = 0
+

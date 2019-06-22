@@ -1,0 +1,59 @@
+Sending build context to Docker daemon 5.632 kBSending build context to Docker daemon 5.632 kB
+Step 1 : FROM maprcore:5.2.0
+ ---> fda61fdefc50
+Step 2 : COPY mapr_patch.repo /etc/yum.repos.d/
+ ---> d21e46c2ea98
+Removing intermediate container 4df498c4f6ca
+Step 3 : RUN yum install -y     mapr-patch     ;
+ ---> Running in 41eb7c29a072
+Loaded plugins: fastestmirror
+Setting up Install Process
+Loading mirror speeds from cached hostfile
+ * base: centos.sonn.com
+ * extras: centos.unixheads.org
+ * updates: mirrors.ocf.berkeley.edu
+Resolving Dependencies
+--> Running transaction check
+---> Package mapr-patch.x86_64 0:5.2.0.39122.GA-40393 will be installed
+--> Finished Dependency Resolution
+
+Dependencies Resolved
+
+================================================================================
+ Package         Arch        Version                      Repository       Size
+================================================================================
+Installing:
+ mapr-patch      x86_64      5.2.0.39122.GA-40393         MapR_Patch      339 M
+
+Transaction Summary
+================================================================================
+Install       1 Package(s)
+
+Total download size: 339 M
+Installed size: 1.1 G
+Downloading Packages:
+Running rpm_check_debug
+Running Transaction Test
+Transaction Test Succeeded
+Running Transaction
+  Installing : mapr-patch-5.2.0.39122.GA-40393.x86_64                       1/1 
+  Verifying  : mapr-patch-5.2.0.39122.GA-40393.x86_64                       1/1 
+
+Installed:
+  mapr-patch.x86_64 0:5.2.0.39122.GA-40393                                      
+
+Complete!
+ ---> 36948393d982
+Removing intermediate container 41eb7c29a072
+Step 4 : COPY init-script /usr/bin/init-script
+ ---> ad80acb83e66
+Removing intermediate container c4fed867dfd5
+Step 5 : ENTRYPOINT /usr/bin/init-script
+ ---> Running in a18cf4b0ef26
+ ---> 69b169bd57b7
+Removing intermediate container a18cf4b0ef26
+Step 6 : EXPOSE 22
+ ---> Running in 06c706d302a8
+ ---> aebbb5385ed9
+Removing intermediate container 06c706d302a8
+Successfully built aebbb5385ed9

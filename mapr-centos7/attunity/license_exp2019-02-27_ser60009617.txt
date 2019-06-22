@@ -1,0 +1,18 @@
+#
+# Attunity  License
+# Generated on 28-Feb-2018 10:05:48.5914+02:00 
+# License Comment: MapR Internal SAP Demo
+#
+license_type=EVALUATION_LICENSE
+licensed_to=MapR SAP Demo
+licensed_by=Attunity US
+serial_no=60009617
+expiration_date=2019-02-27
+hosts=
+source_types=Oracle,SQLServer,FileChannel,DB2LUW,DB2zOS,DB2iSeries,SQLMP,MSSQLAIS,Enscribe,Salesforce,SybaseASE,ODBC,RMS,MySQL,Informix,VSAM,IMS,Hadoop,File,SQLMX,Teradata,OdbcWithCdc,PostgreSQL,MongoDB,DB2LUW,SAP,Netezza,Redshift,SapHana
+target_types=Oracle,SQLServer,Teradata,ODBC,Greenplum,FileChannel,Vectorwise,GenericFile,SybaseIQ,Vertica,SybaseASE,SqlserverPDW,Netezza,Aster,Redshift,HADOOP,MySQL ,File,ActianMatrix,HAWQ,PostgreSQL,MongoDB,AzureDW,Kafka,EventHubs,Kinesis,SapHana,Snowflake,S3,AzureMy
+features=
+version=6.1
+issue_date=2018-02-28
+checksum=8FCRH-ER3RJ-3H59E-93794
+

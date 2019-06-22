@@ -1,0 +1,43 @@
+FROM mapr_server_centos7:MAPR_CORE_VER_MAPR_MEP_VER
+ 
+COPY REPOSITORY /home/mapr/REPOSITORY
+COPY mapr_patch.repo /etc/yum.repos.d/
+
+# Set up mapr repositories for install 
+#  sed -i -e "s/\/releases\/v.*\/redhat/\/releases\/vMAPR_CORE_VER\/redhat/" /etc/yum.repos.d/mapr_core.repo && \
+#  sed -i -e "s/\/MEP\/MEP-.*\/redhat/\/MEP\/MEP-MAPR_MEP_VER\/redhat/" /etc/yum.repos.d/mapr_mep.repo && \
+RUN \
+  mkdir -p /home/mapr/tmp && \
+  CORE_REPO=$(grep -i core /home/mapr/REPOSITORY | tr -s ' ' | cut -f 2 -d ' ') && \
+  MEP_REPO=$(grep -i mep /home/mapr/REPOSITORY | tr -s ' ' | cut -f 2 -d ' ') && \
+  PATCH_REPO=$(grep -i patch /home/mapr/REPOSITORY | tr -s ' ' | cut -f 2 -d ' ') && \
+  cp /etc/yum.repos.d/mapr_core.repo /home/mapr/tmp/mapr_core.repo && \
+  cp /etc/yum.repos.d/mapr_mep.repo /home/mapr/tmp/mapr_mep.repo && \
+  cp /etc/yum.repos.d/mapr_patch.repo /home/mapr/tmp/mapr_core.repo && \
+  sed -i -e "s^http://package.mapr.com^$CORE_REPO^g" /etc/yum.repos.d/mapr_core.repo && \
+  sed -i -e "s^http://package.mapr.com^$MEP_REPO^g" /etc/yum.repos.d/mapr_mep.repo && \
+  sed -i -e "s^http://package.mapr.com^$PATCH_REPO^g" /etc/yum.repos.d/mapr_mep.repo && \
+  rpm --import $CORE_REPO/releases/pub/maprgpg.key && \
+  rpm --import $CORE_REPO/releases/pub/gnugpg.key && \
+  :
+
+# Remove backed up files in /opt/mapr/.patch in same docker layer as patch install to ensure
+# container doesn't maintain the deleted files.
+RUN \
+  yum install -y \
+      mapr-hive \
+      mapr-tez \
+      mapr-spark \
+      mapr-patch && \
+      rm -rf /opt/mapr/.patch \
+      && :
+
+# Reset repos to package.mapr.com.  But not patch repo since there is none at package.mapr.com
+RUN \
+  /bin/cp -f /home/mapr/tmp/mapr_core.repo /etc/yum.repos.d/mapr_core.repo && \
+  /bin/cp -f /home/mapr/tmp/mapr_mep.repo /etc/yum.repos.d/mapr_mep.repo && \
+  :
+
+
+EXPOSE 22
+CMD ["/usr/sbin/init"]

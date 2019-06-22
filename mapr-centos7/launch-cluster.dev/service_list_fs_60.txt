@@ -1,0 +1,4 @@
+0 fileserver 
+1 fileserver cldb zookeeper webserver
+2 fileserver cldb zookeeper webserver
+3 fileserver zookeeper admin

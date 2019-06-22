@@ -1,0 +1,4 @@
+0 collectd fileserver nodemanager drill 
+1 collectd fileserver nodemanager drill zookeeper cldb webserver hivemetastore opentsdb
+2 collectd fileserver nodemanager drill zookeeper cldb webserver spark-historyserver hiveserver2 
+3 collectd fileserver nodemanager drill zookeeper resourcemanager historyserver opentsdb

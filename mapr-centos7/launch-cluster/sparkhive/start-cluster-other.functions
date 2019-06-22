@@ -1,0 +1,348 @@
+#!/bin/bash
+
+initialize_other()
+{
+  [[ -z $SSHOPTS ]] && \
+      SSHOPTS="-o LogLevel=quiet -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no"
+
+  # set clusterNode if not set
+  [[ -z $clusterNode ]] && \
+     clusterNode=$(clush -N -g fileserver --pick=1 hostname -f 2>/dev/null)
+
+  # set CLUSTERNAME if not set
+  [[ -z $CLUSTERNAME ]] && \
+     CLUSTERNAME=$(ssh $clusterNode "maprcli dashboard info -json"  \
+                   | jq -r .data[].cluster.name)
+
+  clusterNameDash="${CLUSTERNAME//./-}" # Replace periods with hyphens. Used for hostname to ensure proper domain setting.
+  clusterNameDash="${clusterNameDash//_/-}" # Replace underscore with hyphens. Used for hostname to ensure valid hostname setting.
+
+  # set security variables (required by run_hive_test
+  # Unsecure cluster example:	vora secure=false vora01.pal.sap.corp:7222 vora02.pal.sap.corp:7222
+  # Secure cluster example:	sparky.mapr.local secure=true sparky01.mapr.local:7222 sparky02.mapr.local:7222
+  # Kerberos cluster example:	sparkerb.mapr.local secure=true kerberosEnable=true cldbPrincipal=mapr/sparkerb.mapr.local@MAPR.LOCAL sparkerb01.mapr.local:7222 sparkerb02.mapr.local:7222
+  ssh $clusterNode cat /opt/mapr/conf/mapr-clusters.conf > /home/mapr/mapr-clusters.conf
+  MAPRSEC=false
+  KERB=false
+  if grep ' cldbPrincipal=' /home/mapr/mapr-clusters.conf > /dev/null ; then
+    KERB=true
+    KERB_REALM=$(cat /home/mapr/mapr-clusters.conf | tr ' ' '\n' | grep 'cldbPrincipal=' | cut -f2 -d'@')
+  elif grep ' secure=true' /home/mapr/mapr-clusters.conf > /dev/null; then
+    MAPRSEC=true
+  fi
+
+}
+
+rackem()
+{
+  verbose "=== ${FUNCNAME[0]} $@ ==="
+  # Put zookeepers in separate racks and use number of ZKs as number of racks
+  # Ensure that CLDBs are also in separate racks (except where #CLDBs > #ZKs)
+
+  declare -a nodeListArr
+  rack=0
+  maxRack=0
+
+  # Start with ZKs that don't have a CLDB
+  nodeListArr[0]="$(clush -N -g zookeeper -X cldb hostname -f | sort)"
+  # Then ZKs that do have a CLDB
+  nodeListArr[1]="$(clush -N -g zookeeper '[[ -f /opt/mapr/roles/cldb ]] && hostname -f' 2>/dev/null | sort )"
+  # Then fix maxRack here with one ZK per rack, regardless of whether it has a CLDB also
+  # Start racking remaining CLDB's (that don't have a ZK) in existing racks to ensure CLDBs are in separate racks
+  nodeListArr[2]="$(clush -N -g cldb '[[ ! -d /opt/mapr/zkdata ]] && hostname -f' 2>/dev/null | sort)"
+  # Then rack remaining nodes
+  nodeListArr[3]="$(clush -N -g $CLUSTERNAME -X zookeeper -X cldb hostname -f | sort)"
+  
+  arrIdx=-1
+  for nodeList in "${nodeListArr[@]}"; do
+    let arrIdx++
+    for nextNode in $nodeList; do
+      [[ $arrIdx -le 1 ]] && let maxRack++ # Don't increment maxRack after all ZKs have been racked
+      let rack++ ; [[ $rack -gt $maxRack ]] && rack=1
+      # Run maprcli's simultaneously in background to speed up.  Put in subshell to avoid bash job output.
+      (sshpass -p "mapr" ssh $SSHOPTS $nextNode \
+        "maprId=\$(maprcli node list -columns id -json -filter '[hostname==$nextNode]' | jq -r .data[].id) ;\
+         echo $nextNode: maprcli node move -serverids \$maprId -topology /data/rack$rack ;\
+         maprcli node move -serverids \$maprId -topology /data/rack$rack ;\
+	 " & )
+    done
+  done
+  wait
+}
+
+setup_tez()
+{
+  verbose "=== ${FUNCNAME[0]} $@ ==="
+  hadoop fs -mkdir /apps/tez
+  TEZDIR=$(sshpass -p "mapr" ssh $SSHOPTS $clusterNode \
+    'TEZDIR=/opt/mapr/tez/tez-$(cat /opt/mapr/tez/tezversion 2>/dev/null) || TEZDIR=$(ls -1d /opt/mapr/tez/tez-[0-9]* | tail -1) ; \
+     echo $TEZDIR')
+  sshpass -p "mapr" ssh $SSHOPTS $clusterNode "hadoop fs -put $TEZDIR /apps/tez"
+  hadoop fs -chmod -R 755 /apps/tez
+  # Want TEZDIR evaluated by not other variables.  Careful with single vs. double quotes!
+  echo "export TEZ_CONF_DIR=$TEZDIR/conf" > hive-env.sh
+  echo "export TEZ_JARS=$TEZDIR/*:$TEZDIR/lib/*" >> hive-env.sh
+  echo 'export HADOOP_CLASSPATH=$TEZ_CONF_DIR:$TEZ_JARS:$HADOOP_CLASSPATH' >> hive-env.sh
+  hiveConfDir=$(clush -g hivemetastore -N --pick=1 'find /opt/mapr/hive -name conf | grep "/opt/mapr/hive/hive-[0-9,.]\+/conf"')
+  clush -cg $CLUSTERNAME hive-env.sh --dest $hiveConfDir
+  
+  echo "  <property>"                           > /home/mapr/hive-tez-properties.xml
+  echo "    <name>hive.execution.engine</name>" >> /home/mapr/hive-tez-properties.xml
+  echo "    <value>tez</value>"                 >> /home/mapr/hive-tez-properties.xml
+  echo "  </property>"                          >> /home/mapr/hive-tez-properties.xml
+  sed -i -e '/^<configuration/r /home/mapr/hive-tez-properties.xml' /home/mapr/hive-site.xml
+
+}
+
+setup_hivemeta()
+{
+  verbose "=== ${FUNCNAME[0]} $@ ==="
+
+  # 9/28/2018 Adding functions so I can make a tez parameter if I want a choice.  Making it default 
+  # (added mapr-tez to the hive containers also)
+  setup_tez
+
+
+  # Find a webserver to make REST calls
+  webServer=$(clush -N -g webserver --pick=1 hostname -s 2> /dev/null)
+  [[ -z $webServer ]] && errexit "No webserver specified.  Cannot use REST calls."
+
+  # Check for hivemeta service.  If none, return
+  svc=hivemeta
+  [[ "$(curl -s -k -u root:mapr https://$webServer:8443/rest/service/list | jq -r '.data[].name')" =~ "$svc" ]] || return
+
+  MYSQL_JAVA_CONNECTOR=mariadb-java-client-1.5.5.jar
+  #mySqlHost=$(grep 'mapr-mysql' /etc/hosts | awk '{print $2}')
+  mySqlHost=${clusterNameDash}-mapr-mysql
+  # periods and dashes are not valid mysql db name characters
+  dbName="hivedb_${CLUSTERNAME//./_}"
+  dbName="${dbName//-/_}"
+  mysqlCmd="use mysql;"
+  for hivemetaHost in $(clush -N -g hivemetastore 'hostname; hostname -i | tr " " "\n" |sort | uniq'); do
+    # if not exists not available until MariaDB 10.1.3.  sort/uniq the IPs in for loop to ensure no dups
+    #printf -v cmd "create user if not exists 'mapr'@'%s' identified by 'mapr';" "$hivemetaHost"
+    printf -v cmd "create user 'mapr'@'%s' identified by 'mapr';" "$hivemetaHost"
+    mysqlCmd+=$cmd
+    printf -v cmd "grant all on %s.* to 'mapr'@'%s';" $dbName "$hivemetaHost"
+    mysqlCmd+=$cmd
+    metastoreUris+="thrift://$hivemetaHost:9083,"
+  done
+set -x
+  mysql -h $mySqlHost -u root -pmapr -e "$mysqlCmd" || errexit "Unable to set up mysql database for hive metastore"
+set +x
+  hiveLibDir=$(clush -g hivemetastore -N --pick=1 'find /opt/mapr/hive -name lib | grep "/opt/mapr/hive/hive-[0-9,.]\+/lib"')
+  hiveConfDir=$(clush -g hivemetastore -N --pick=1 'find /opt/mapr/hive -name conf | grep "/opt/mapr/hive/hive-[0-9,.]\+/conf"')
+  clush -cg hivemetastore /home/mapr/$MYSQL_JAVA_CONNECTOR --dest ${hiveLibDir}
+  metastoreUris=${metastoreUris%,}
+  sed -i -e"s^METASTOREURIS^${metastoreUris}^" \
+         /home/mapr/hive-site.xml
+  cp /home/mapr/hive-site.xml /home/mapr/hive-site-metastore.xml
+  sed -i -e '/^<configuration/r /home/mapr/hive-metastore-properties.xml' /home/mapr/hive-site-metastore.xml
+  sed -i -e"s^DBNAME^${dbName}^" \
+	 -e"s^MYSQLHOST^${mySqlHost}^" \
+	 /home/mapr/hive-site-metastore.xml
+  clush -cg $CLUSTERNAME /home/mapr/hive-site.xml --dest ${hiveConfDir}
+  clush -cg hivemetastore /home/mapr/hive-site-metastore.xml --dest ${hiveConfDir}/hive-site.xml
+
+  # Remove <\configuration> line from end of hive-site.xml
+  # Append properties and trailing <\configuration> from latest hive conf.2018... directory 
+
+  # Copy modified file over original hive-site.xml
+ 
+#AML: NO conf.20XX dir in MEP 3.0.2  
+#     If no conf.20XX directory found, use conf.new
+
+# AML 9/28/2018 - BUG: grep command has single quote.  This never runs.  Do we need/want hive-site.xml values from conf dir anyway?
+#                      overwrites javax.jdo mariadb stuff with derby on metastore?  
+  clush -Bg $CLUSTERNAME 'HIVEDIR=$(ls -d1 /opt/mapr/hive/hive-[0-9]* | tail -1) ; \
+                          awk "/^<\/configuration>/ {next} /.*/" $HIVEDIR/conf/hive-site.xml > /tmp/hive-site.xml; \
+			  HIVENEWCONFDIR=$(ls -d1 $HIVEDIR/conf.20* | tail -1) ; \
+			  [[ -z $HIVENEWCONFDIR ]] && HIVENEWCONFDIR=$HIVEDIR/conf.new ; \
+			  awk "/<property>/ {x=1} x" $HIVENEWCONFDIR/hive-site.xml >> /tmp/hive-site.xml; \
+			  grep '^</configuration' /tmp/hive-site.xml >/dev/null || echo '</configuration>' >> /tmp/hive-site.xml
+			  mv -f /tmp/hive-site.xml $HIVEDIR/conf/hive-site.xml'
+
+  # Security concern - password for metastore DB plain text on metastore server 
+  # but see RN for Hive 2.1.1 https://mapr.com/docs/60/EcosystemRN/HiveRN-2.1.1-1803.html
+  # re: permissions change for hive-site.xml
+  clush -Bg $CLUSTERNAME chmod o+r ${hiveConfDir}/hive-site.xml
+
+  for maprService in hivemeta hs2; do
+    clush -g $CLUSTERNAME --pick=1 "maprcli node services -action restart -name $maprService -filter [csvc==$maprService]"
+  done
+}
+
+setup_spark() {
+  verbose "=== ${FUNCNAME[0]} $@ ==="
+  clush -Bg $CLUSTERNAME \
+    '\
+     SPARKDIR=/opt/mapr/spark/spark-$(cat /opt/mapr/spark/sparkversion) || SPARKDIR=$(ls -1d /opt/mapr/spark/spark-[0-9]* | tail -1) ;  \
+     mv $SPARKDIR/conf/hive-site.xml $SPARKDIR/conf/hive-site.xml.orig ; \
+     HIVEDIR=/opt/mapr/hive/hive-$(cat /opt/mapr/hive/hiveversion) || HIVEDIR=$(ls -1d /opt/mapr/hive/hive-[0-9]* | tail -1) ;  \
+     ln -s $HIVEDIR/conf/hive-site.xml $SPARKDIR/conf/hive-site.xml \
+    '
+
+  echo "Creating Hadoop directories /apps/spark and /user/user1 for Spark Pi test"
+  # No longer need to sshpass.  Launcher now configured properly as a mapr client
+  #sshpass -p "mapr" ssh $SSHOPTS $clusterNode 'hadoop fs -mkdir /apps/spark; hadoop fs -chmod 777 /apps/spark'
+  #sshpass -p "mapr" ssh $SSHOPTS $clusterNode 'hadoop fs -mkdir /user/user1; hadoop fs -chown user1:user1 /user/user1'
+  hadoop fs -mkdir /apps/spark; hadoop fs -chmod 777 /apps/spark
+  hadoop fs -mkdir /user/user1; hadoop fs -chown user1:user1 /user/user1
+
+  # Re-start spark-historyserver which, if started, failed due to no /apps/spark directory
+  sshpass -p "mapr" ssh $SSHOPTS $clusterNode 'maprcli node services -action start -name spark-historyserver -filter [csvc==spark-historyserver]'
+  
+}
+
+run_spark_test() {
+  # Run basic spark test
+
+  verbose "=== ${FUNCNAME[0]} $@ ==="
+  find /opt/mapr/spark -name spark-examples\*mapr\*.jar
+  echo "Run SparkPi example to confirm Spark on YARN is properly configured"
+  cat <<-'EOF' > /tmp/sparktest.sh
+  #!/bin/bash
+  SPARK_HOME=/opt/mapr/spark/spark-$(cat /opt/mapr/spark/sparkversion) || SPARK_HOME=$(ls -1d /opt/mapr/spark/spark-[0-9]* | tail -1)
+  export SPARK_HOME
+  export SPARK_EXAMPLES_JAR=$(find $SPARK_HOME -name spark-examples\*mapr\*.jar | tail -1)
+  #
+  # disable ssl for Spark on YARN.  YARN handles encryption and spark user cannot read /opt/mapr/conf/ssl_keystore
+  cp $SPARK_HOME/conf/spark-defaults.conf /tmp/
+  sed -i -e 's/^spark.ssl.enabled true/spark.ssl.enabled false/' /tmp/spark-defaults.conf
+  echo ' '
+  #  --deploy-mode cluster \
+  #  --deploy-mode client \
+
+  su - user1 -c "$SPARK_HOME/bin/spark-submit \
+    --class org.apache.spark.examples.SparkPi \
+    --properties-file /tmp/spark-defaults.conf \
+    --master yarn \
+    --deploy-mode cluster \
+    --num-executors 2 \
+    --driver-memory 512m \
+    --executor-memory 512m \
+    --executor-cores 2 \
+    --queue default \
+    $SPARK_EXAMPLES_JAR 10; \
+  YARNRESULT=\$(yarn application -list -appTypes SPARK -appStates FINISHED,FAILED | sort | grep SparkPi | tail -1) ; \
+  echo \$YARNRESULT ; \
+  APPID=\$(echo \$YARNRESULT | cut -f 1 -d ' ') ; \
+  yarn logs -applicationId \$APPID 2>/dev/null | grep 'Pi is' "
+
+  echo ' '
+	EOF
+  chmod +x /tmp/sparktest.sh
+  sed -i -e "s/^ *//" /tmp/sparktest.sh
+
+  sshpass -p "mapr" scp $SSHOPTS -pr /tmp/sparktest.sh $clusterNode:/tmp/sparktest.sh
+  # $MAPRSEC && sshpass -p "mapr" ssh $SSHOPTS $clusterNode 'echo user1 | su -c "maprlogin password" user1'
+  sshpass -p "mapr" ssh $SSHOPTS $clusterNode '/tmp/sparktest.sh'
+}
+
+
+wait_for_mapr_service()
+{
+  verbose "=== ${FUNCNAME[0]} $@ ==="
+  svc=$1
+  # Pick a random webserver
+  webServer=$(clush -N -g webserver --pick=1 hostname -f 2> /dev/null)
+
+  # Wait for $svc
+  SLEEPSECS=5
+  RETRIES=120
+  ATTEMPT=0
+  echo -n "Waiting $(echo $SLEEPSECS*$RETRIES | bc) seconds for MapR service $svc to start.  Checking every $SLEEPSECS seconds. "
+  while true; do 
+    let ATTEMPT+=1
+    if [[ $(curl -s -k -u root:mapr https://$webServer:8443/rest/service/list | jq -r '.data[].name') =~ $svc ]]; then 
+      echo $svc is running
+      break
+    fi
+    if [[ $ATTEMPT -gt $RETRIES ]]; then 
+      echo ""
+      echo "MapR service $svc not started after $ATTEMPT checks in $(echo $SLEEPSECS*$ATTEMPT | bc ) seconds"
+      return
+    fi 
+    echo -n "."
+    sleep $SLEEPSECS
+  done
+  echo ""
+}
+
+wait_for_port()
+{
+  # Wait for LISTEN on a port on a server
+  # $1=server
+  # $2=port
+
+  verbose "=== ${FUNCNAME[0]} $@ ==="
+  server=$1
+  port=$2
+  # Pick a random webserver
+  webServer=$(clush -N -g webserver --pick=1 hostname -f 2> /dev/null)
+
+  # Wait for $svc
+  SLEEPSECS=5
+  RETRIES=120
+  ATTEMPT=0
+  echo -n "Waiting $(echo $SLEEPSECS*$RETRIES | bc) seconds for LISTEN on $server:$port.  Checking every $SLEEPSECS seconds. "
+  while true; do 
+    let ATTEMPT+=1
+    if ssh $server "netstat -an | grep $port | grep LISTEN > /dev/null"; then 
+      echo $server:$port LISTENing
+      break
+    fi
+    if [[ $ATTEMPT -gt $RETRIES ]]; then 
+      echo ""
+      echo "$server:$port not LISTENing after $ATTEMPT checks in $(echo $SLEEPSECS*$ATTEMPT | bc ) seconds"
+      return
+    fi 
+    echo -n "."
+    sleep $SLEEPSECS
+  done
+  echo ""
+}
+
+run_hive_test() {
+  # Run basic hive test
+  verbose "=== ${FUNCNAME[0]} $@ ==="
+
+  # Get data for maprconfig table and put in local file /tmp/maprconfig.dat
+  sshpass -p "mapr" ssh $SSHOPTS $clusterNode \
+   'maprcli config load -json | \
+    grep -A999 data | \
+    tail -n +2 | \
+    grep ":" | \
+    sed -e "s/:/|/" -e "s/\"//g" -e"s/,\$//" | \
+    awk "{print \$1}" \
+   ' > /tmp/maprconfig.dat
+
+  TABLEROWS=$(wc -l /tmp/maprconfig.dat  | cut -f 1 -d ' ')
+  hadoop fs -mkdir /user/user1/maprconfig.hivetable
+  hadoop fs -put /tmp/maprconfig.dat /user/user1/maprconfig.hivetable/
+  hadoop fs -chown -R user1:user1 /user/user1/maprconfig.hivetable
+
+  HIVESERVER2=$(clush -N --pick=1 -g hiveserver2 hostname)
+  authStr=""
+  $MAPRSEC && authStr="/;auth=maprsasl"
+  $KERB && authStr="/;principal=mapr/$CLUSTERNAME@$KERB_REALM"
+  cat <<-EOM  > /tmp/create_maprconfig.beeline
+	!connect jdbc:hive2://$HIVESERVER2:10000$authStr user1 user1 org.apache.hive.jdbc.HiveDriver
+	create external table if not exists maprconfig(key string, value string) row format delimited fields terminated by '|' location '/user/user1/maprconfig.hivetable';
+	select count(*) as count from maprconfig;
+	EOM
+
+   # Pick a non hiveserver2 host to use as the client
+   HN=$(clush --pick=1 -N -g fileserver -X hiveserver2 hostname)
+
+   sshpass -p user1 scp /tmp/create_maprconfig.beeline user1@${HN}:/home/user1/
+   echo "Creating hive table and running map reduce job to count mapr configuration parameters."
+   echo " "
+   echo "Successful count will be ${TABLEROWS}."
+   echo " "
+   # confirm hs2 is running
+   wait_for_mapr_service hs2
+   wait_for_port $HIVESERVER2 10000 # hs2 can be running seconds before it's listening!
+   sshpass -p user1 ssh user1@${HN} hive --service beeline -f /home/user1/create_maprconfig.beeline
+}
+

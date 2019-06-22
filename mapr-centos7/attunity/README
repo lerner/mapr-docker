@@ -1,0 +1,33 @@
+All software and license file are in ../../AttunitySoftware.  They are removed from this directory to prevent unintentional distribution.
+See the README file in that directory for docker run instructions which include the following:
+
+To run replicate (and you will need to edit for your docker network). Note that this will create an external volume for the directory called /data. You can choose to let docker pick the place to put it, or you can specify a path.
+
+docker run  \
+  --name replicate \
+  --hostname replhost \
+  --net replnet \
+  --ip 172.18.0.12 \
+  --add-host mysqldb:172.18.0.3 \
+  -v /data \
+  -it \
+  -d \
+  replicate
+
+Here is how to configure a container with MySQL … note that the last two line are required in order for Replicate to be able to capture changes from MySQL:
+
+docker run -d \
+  --name mysqldb \
+  --hostname mysqldb \
+  --net replnet \
+  --ip 172.18.0.3 \
+  -e MYSQL_ROOT_PASSWORD=welcome1 \
+  -v /var/lib/mysql:/home/jneal/dockerfiles/var/lib/mysql \
+  mysql:5.6 \
+  mysqld \
+  --datadir=/var/lib/mysql \
+  --user=mysql \
+  --server-id=1 \
+  --log-bin=/var/lib/mysql/mysql-bin.log \
+  --binlog-format=ROW
+

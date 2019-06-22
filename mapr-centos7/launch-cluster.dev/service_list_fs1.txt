@@ -1,0 +1,2 @@
+0 fileserver 
+1 single-node zookeeper

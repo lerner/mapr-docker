@@ -1,0 +1,6 @@
+0 fileserver posix-client-platinum
+1 fileserver cldb posix-client-platinum
+2 fileserver cldb posix-client-platinum
+3 fileserver zookeeper webserver posix-client-platinum
+4 fileserver zookeeper webserver posix-client-platinum
+5 fileserver zookeeper posix-client-platinum

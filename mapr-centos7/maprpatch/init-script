@@ -1,0 +1,38 @@
+#/bin/bash
+
+sed -i --copy -e "s/^search/search $DOMAIN/" /etc/resolv.conf
+echo "StrictHostKeyChecking no" >> /root/.ssh/config
+service sshd start
+
+IP=$(hostname -I)
+
+/opt/mapr/server/mruuidgen > /opt/mapr/hostid
+cat /opt/mapr/hostid > /opt/mapr/conf/hostid.$$
+
+cp /proc/meminfo /opt/mapr/conf/meminfofake
+
+# Include the following for mapr-nfs
+#cp /opt/mapr/conf/mapr_fstab.sample /opt/mapr/conf/mapr_fstab
+#mkdir /mapr
+#service rpcbind start
+#chkconfig rpcbind on
+
+sed -i "/^MemTotal/ s/^.*$/MemTotal:     ${MEMTOTAL} kB/" /opt/mapr/conf/meminfofake
+sed -i "/^MemFree/ s/^.*$/MemFree:     ${MEMTOTAL-10} kB/" /opt/mapr/conf/meminfofake
+sed -i "/^MemAvailable/ s/^.*$/MemAvailable:     ${MEMTOTAL-10} kB/" /opt/mapr/conf/meminfofake
+
+sed -i 's/AddUdevRules(list/#AddUdevRules(list/' /opt/mapr/server/disksetup
+
+sed -i 's%^baseurl = http://10.10.99.61%baseurl = http://package.mapr.com%' /etc/yum.repos.d/mapr_core.repo
+sed -i 's%^baseurl = http://10.10.99.61%baseurl = http://package.mapr.com%' /etc/yum.repos.d/mapr_patch.repo
+
+truncate -s 20G /opt/mapr/diskfile
+#/opt/mapr/server/configure.sh -C ${IP} -Z ${IP} -D ${DISKLIST} -N ${CLUSTERNAME} -u mapr -g mapr -noDB -no-autostart
+
+echo "This container IP : ${IP}"
+
+while true
+do
+  sleep 3600
+done
+

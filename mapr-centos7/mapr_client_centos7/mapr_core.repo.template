@@ -1,0 +1,7 @@
+[MapR_Core]
+name = MapR Core Components
+enabled = 1
+baseurl = http://package.mapr.com/releases/vMAPR_CORE_VER/redhat
+protected = 1
+gpgcheck = 1
+

@@ -1,0 +1,868 @@
+#!/bin/bash
+
+errexit()
+{
+  echo $(date): ERROR: $@
+  if [[ ! -z $AWS_CFT_MAPR_URL ]] ; then
+    echo -n '{"Status" : "FAILURE", "Reason" : "' > /tmp/awsMaprURL.json
+    echo -n "$@" >> /tmp/awsMaprURL.json
+    echo -n '", "UniqueId" : "errexit", "Data" : "' >> /tmp/awsMaprURL.json
+    echo -n "$@" >> /tmp/awsMaprURL.json
+    echo '" }' >> /tmp/awsMaprURL.json
+    curl -T /tmp/awsMaprURL.json "$AWS_CFT_MAPR_URL"
+  fi
+  exit
+}
+
+warn()
+{
+  echo "$(date): WARN: $@"
+}
+
+debug()
+{
+  $DEBUG && echo "$(date): DEBUG: $@"
+}
+
+verbose()
+{
+  $VERBOSE && echo "$(date): $@"
+}
+
+re_initialize()
+{
+  MAPRSEC=false
+  KERB=false
+  VERBOSE=true
+  SSHOPTS="-o LogLevel=quiet -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no"
+  CLUSTERNAME=$(head -1 /opt/mapr/conf/mapr-clusters.conf | cut -f 1 -d ' ')
+  clusterNode=$(clush -N --pick 1 -g $CLUSTERNAME hostname -f 2>/dev/null)
+  if grep kerberosEnable=true /opt/mapr/conf/mapr-clusters.conf > /dev/null 2>&1 ; then
+    KERB=true
+    KDCHN=$(grep kdc /etc/hosts | head -1 | tr '\t' ' ' | tr -s ' ' | cut -f2 -d ' ')
+    KERB_REALM=$(sshpass -p mapr ssh $KDCHN "grep -A1 '\[realms\]' /var/kerberos/krb5kdc/kdc.conf | tail -1 | tr -s ' ' | cut -f2 -d ' '")
+  elif grep secure=true /opt/mapr/conf/mapr-clusters.conf > /dev/null 2>&1 ; then
+    MAPRSEC=true
+  fi
+}
+
+setup_hosts_old()
+{
+  verbose "=== ${FUNCNAME[0]} $@ ==="
+  echo -n "Set up clush and copy /home/mapr/hosts to all containers."
+  until [[ -f /home/mapr/hosts ]]; do
+    echo -n '.'
+    sleep 1
+  done
+  echo ""
+  
+  ####cp /etc/hosts /home/mapr/hosts.orig
+  # Remove localhost loopback
+  ####tail -n +2 /home/mapr/hosts.orig > /etc/hosts
+  ####cat /home/mapr/hosts >> /etc/hosts
+  cp /home/mapr/groups /etc/clustershell/groups
+  
+  # Workaround for Docker/CentOS bug re: locales when a later glibc-common is installed.
+  # See: https://bugs.centos.org/view.php?id=12631&nbn=4
+  # locale-archive and locale info included with glibc-common later version installed on server as dependency messes up locale-archive.
+  # Symptoms:
+  #   1. Inability to login to MCS as non-root user - Also need sudo installed!
+  #   2. Error messages on login: /etc/profile.d/lang.sh: line 19: warning: setlocale: LC_CTYPE: cannot change locale (en_US.UTF-8): No such file or directory
+
+  clush -ac /usr/lib/locale/locale-archive
+
+  ####clush -ac /etc/hosts
+  clush -ac /etc/clustershell/groups
+  
+  verbose "Add new hosts to squid webproxy server's hosts file"
+  # Set up new hosts in web proxy server's hosts file
+  sshpass -p "mapr" scp $SSHOPTS mapr-webproxy:/etc/hosts /home/mapr/hosts.webproxy
+
+  # Start by putting non ipv4 entries in hosts.webproxy.new
+  cat /home/mapr/hosts.webproxy | grep ^[^0-9] > /home/mapr/hosts.webproxy.new
+
+  # Remove fqdn entries from hosts.webproxy that are replaced by current cluster's fqdn entries
+  SEDOPTS="$(for FQDN in $(grep [^0-9] /home/mapr/hosts | awk '{print $2}'); do echo -n "-e '/$FQDN/d' "; done; echo "")"
+  cat /home/mapr/hosts.webproxy | eval $(printf "sed %s\n" "$SEDOPTS") > /home/mapr/hosts.webproxy.rmvd
+
+  # Combine new hosts file with remaining hosts.webproxy entries and copy back to web-proxy server
+  cat /home/mapr/hosts /home/mapr/hosts.webproxy.rmvd | sort -V -u -k1,1 | grep -v ^[^0-9] >> /home/mapr/hosts.webproxy.new 
+  ####sshpass -p "mapr" scp $SSHOPTS /home/mapr/hosts.webproxy.new mapr-webproxy:/etc/hosts
+
+  # Restart squid with new hosts file. On fresh startup, squid server doesn't stop correctly so it never restarts.  Must run start rather than restart.
+  # Run in separate shell for so we don't have to wait for slow stop time. 
+  verbose "Restart squid webproxy"
+  (sshpass -p "mapr" ssh $SSHOPTS mapr-webproxy service squid stop; sshpass -p "mapr" ssh $SSHOPTS mapr-webproxy service squid start ) > /dev/null 2>&1 &
+}
+
+wait_for_sshd()
+{
+  verbose "=== ${FUNCNAME[0]} $@ ==="
+  # Check for sshd locally, then wait 5 seconds.  TBD - make sure it's started on all nodes
+  until systemctl status sshd > /dev/null; do echo -n . ; sleep 1; done
+  echo .
+  sleep 5
+}
+
+setup_clush()
+{
+  verbose "=== ${FUNCNAME[0]} $@ ==="
+  echo -n "Setting up clush groups for all nodes"
+  until [[ -f /home/mapr/groups ]]; do
+    echo -n '.'
+    sleep 1
+  done
+  echo ""
+  
+  cp /home/mapr/groups /etc/clustershell/groups
+  
+  # Workaround for Docker/CentOS bug re: locales when a later glibc-common is installed.
+  # See: https://bugs.centos.org/view.php?id=12631&nbn=4
+  # locale-archive and locale info included with glibc-common later version installed on server as dependency messes up locale-archive.
+  # Symptoms:
+  #   1. Inability to login to MCS as non-root user - Also need sudo installed!
+  #   2. Error messages on login: /etc/profile.d/lang.sh: line 19: warning: setlocale: LC_CTYPE: cannot change locale (en_US.UTF-8): No such file or directory
+
+  wait_for_sshd
+
+  clush -ac /usr/lib/locale/locale-archive
+
+  clush -ac /etc/clustershell/groups
+}
+
+setup_global_vars()
+{
+  verbose "=== ${FUNCNAME[0]} $@ ==="
+  # Set global variables
+  # clusterNode - Some node in the cluster.  Typically used to execute maprcli commands
+  # cldbList - comma separated list of cldb nodes for configure.sh - moved to configure_cluster()
+  # zookeeperList - comma separated list of zookeeper nodes for configure.sh - moved to configure_cluster()
+
+  clusterNode=$(clush -N --pick 1 -g $CLUSTERNAME hostname -f 2>/dev/null)
+  [[ -z $clusterNode ]] && errexit "Cannot determine a clusternode using clush.  Cannot continue."
+  cldbGroup=cldb
+  zookeeperGroup=zookeeper
+  webserverGroup=webserver
+  opentsdbGroup=opentsdb
+  elasticsearchGroup=elasticsearch
+  configureClusterOpt="-N $CLUSTERNAME"
+  grep '^single-node:' /etc/clustershell/groups 2>&1 > /dev/null && \
+    zookeeperGroup=single-node && \
+    cldbGroup=single-node && \
+    webserverGroup=single-node
+    # single-node had to be my.cluster.com secure=false.  Now we delete mapr-clusters.conf before running configure.sh to ensure we get one entry only with correct cluster name
+#    configureClusterOpt=''
+  zookeeperList=$(nodeset -e @$zookeeperGroup | sed -e 's/ /:5181,/g'):5181
+  maprCoreVersion=$( sshpass -p "mapr" ssh $SSHOPTS $clusterNode "cat /opt/mapr/MapRBuildVersion" )
+}
+
+setup_user()
+{
+  verbose "=== ${FUNCNAME[0]} $@ ==="
+  newUser=$1
+  uid=$(clush -N -a "tail -1 /etc/passwd | cut -f 3 -d':'" | uniq | sort -n | tail -1)
+  let uid+=1
+  gid=$(clush -N -a "tail -1 /etc/group | cut -f 3 -d':'" | uniq | sort -n | tail -1)
+  let gid+=1
+
+  clush -a groupadd --gid $gid $newUser 
+  clush -a useradd --uid $uid  --gid $gid $newUser 
+  clush -a "echo '$newUser:$newUser' | chpasswd "
+
+  setup_credentials $newUser
+}
+
+perm_ticket()
+{
+  verbose "=== ${FUNCNAME[0]} $@ ==="
+
+  # Put ticket in /var/tmp instead of tmp and set MAPR_TICKETFILE_LOCATION in .bashrc
+  
+  # If no user name is passed in, use current user name (root)
+  
+  U=$1
+  [[ -z $U ]] && U=$(id -u -n)
+  
+  # sshpass -p "mapr" ssh $SSHOPTS $clusterNode 'echo mapr | maprlogin password' || errexit "User root unable to maprlogin on $clusterNode"
+  USERID=$(sshpass -p "mapr" ssh $SSHOPTS $clusterNode id -u $U ) || errexit "Unable to get $U uid"
+
+  # Really should just copy the ticket generated by maprlogin but I'm cheating here and creating a long lived ticket so I don't have to repeatedly log in.
+
+  # This command fails sometimes.  Retry a few times if it does.  TBD:  Figure out why it sometimes fails!
+  # sshpass -p "mapr" ssh $SSHOPTS $clusterNode maprlogin generateticket -type service -user $U -out /var/tmp/maprticket_$USERID || errexit "Unable to generate $U service ticket (Returns $?)"
+
+  RETRIES=3
+  SLEEPTIME=5
+  count=$RETRIES
+  while (( $count )); do
+    if ! sshpass -p "mapr" ssh $SSHOPTS $clusterNode maprlogin generateticket -type service -user $U -out /var/tmp/maprticket_$USERID ; then
+      RC=$?
+      let count-=1
+      warn "Unable to generate $U service ticket (Returns $RC)"
+      [[ $count -eq 0 ]] && errexit "Unable to generate $U service ticket after $RETRIES attempts (Returns $RC)"
+      sleep $SLEEPTIME
+      continue
+    else
+      break
+    fi
+  done
+
+  sshpass -p "mapr" ssh $SSHOPTS $clusterNode "clush -c -g client -g $CLUSTERNAME /var/tmp/maprticket_$USERID" || errexit "Unable to distribute $U service ticket"
+  clush -B -g client -g $CLUSTERNAME chown $U:$U /var/tmp/maprticket_$USERID || errexit "Unable to set permissions on $U service ticket"
+  clush -B -g client -g $CLUSTERNAME "! grep '^export MAPR_TICKETFILE_LOCATION' ~$U/.bashrc > /dev/null 2>&1 && echo 'export MAPR_TICKETFILE_LOCATION=/var/tmp/maprticket_$USERID' >> ~$U/.bashrc " || errexit "Unable to set ticket file location in ~$U/.bashrc"
+
+  # If user is the user running the script, set the ticket file location env var for the duration of the script
+  [[ "$U" = "$(id -u -n)" ]] && export MAPR_TICKETFILE_LOCATION=/var/tmp/maprticket_$USERID
+  
+}
+
+configure_cluster()
+{
+  set -x
+  verbose "=== ${FUNCNAME[0]} $@ ==="
+  #echo "=== $(date): ${FUNCNAME[0]}"
+  clush -Bg $CLUSTERNAME "service mapr-warden stop"
+  # TBD: Pass in datfilesize as var
+  clush -Bg $CLUSTERNAME  "if [[ -d /data ]] ; then truncate -s 20G /data/maprdatafile; chown mapr:mapr /data/maprdatafile; fi"
+
+  verbose "Set up nodes to use local yum MapR repository containers if available."
+  CORE_REPO=http://mapr-core-repo
+  MEP_REPO=http://mapr-mep-repo
+  if curl -s -L $CORE_REPO/releases | grep "Index of /releases" > /dev/null 2>&1 ; then
+    clush -aB "sed -i -e 's^http://package.mapr.com^$CORE_REPO^g' /etc/yum.repos.d/mapr_core.repo"
+  fi
+  # Look for local MEP repository
+  if curl -s -L $MEP_REPO/releases | grep "Index of /releases" > /dev/null 2>&1 ; then
+    MAPR_MEP_VER=$(curl -s http://mapr-mep-repo/releases/MEP/ | grep 'MEP-' | head -1 | sed -e 's/^.*href="MEP-//' -e 's^/.*$^^')
+    [[ ! -z $MAPR_MEP_VER ]] && clush -aB "cd /etc/yum.repos.d && [[ -f mapr_mep.repo.template ]] && [[ ! -f mapr_mep.repo ]] && sed -e's/MAPR_MEP_VER/$MAPR_MEP_VER/' mapr_mep.repo.template > mapr_mep.repo"
+    clush -aB "sed -i -e 's^http://package.mapr.com^$MEP_REPO^g' /etc/yum.repos.d/mapr_mep.repo"
+  else # No local MEP repository 
+    # If there is a mapr_mep.repo file on one of the servers, use that, otherwise use latest MapR MEP
+    REPOSRVR=$(clush -a ls /etc/yum.repos.d/mapr_mep.repo 2>/dev/null | head -1 | cut -f1 -d ":")
+    if [[ ! -z $REPOSRVR ]] ; then
+      ssh $REPOSRVR clush -ac /etc/yum.repos.d/mapr_mep.repo
+    else
+      MAPR_MEP_VER=$(curl -s http://package.mapr.com/releases/MEP/ | grep 'MEP-[0-9].[0-9].[0-9]' | tail -1 | sed -e 's/^.*href="MEP-//' -e 's^/.*$^^')
+      [[ ! -z $MAPR_MEP_VER ]] && clush -aB "cd /etc/yum.repos.d && [[ -f mapr_mep.repo.template ]] && [[ ! -f mapr_mep.repo ]] && sed -e's/MAPR_MEP_VER/$MAPR_MEP_VER/' mapr_mep.repo.template > mapr_mep.repo"
+    fi
+  fi
+  
+  verbose "Install MapR role and additional packages."
+  # Don't want to install custom (i.e. non-MapR) services until after mapr and mep are configured so disable other repos.
+  clush -B -g $CLUSTERNAME -g client '[[ -f /home/mapr/mapr_packages.txt ]] && for pkg in $(cat /home/mapr/mapr_packages.txt ); do yumPkgs+="mapr-$pkg " ; done;  [[ ! -z $yumPkgs ]] && yum --disablerepo="*" --enablerepo=MapR_Core --enablerepo=MapR_Ecosystem install -y $yumPkgs | grep "^ "'
+  
+  cldbList=""
+  for cldbHost in $(clush -g $CLUSTERNAME ls /opt/mapr/roles/cldb 2>/dev/null | cut -f1 -d':'); do
+    cldbList+=$(ssh $cldbHost hostname -f),
+  done
+  [[ -z $cldbList ]] && errexit "No CLDBs specified.  Cannot continue."
+  cldbList=${cldbList%,}
+
+  zookeeperList=""
+  for zookeeperHost in $(clush -a ls /opt/mapr/roles/zookeeper 2>/dev/null | cut -f1 -d':'); do
+    zookeeperList+=$(ssh $zookeeperHost hostname -f),
+  done
+  [[ -z $zookeeperList ]] && errexit "No zookeepers specified.  Cannot continue."
+  zookeeperList=${zookeeperList%,}
+
+  # First NIC is cluster network.  Set up MAPR_SUBNETS accordingly.
+  clush -Bg $CLUSTERNAME 'echo export MAPR_SUBNETS=$(ifconfig | grep inet |head -1 | sed -e"s/^.*inet //" | cut -f1,2 -d .).0.0/16 >> /opt/mapr/conf/env.sh'
+  
+  # Reduce memory used by disksetup to 50% of fake memory.  It does not adhere to meminfofake.
+  clush -Bg $CLUSTERNAME "cp /opt/mapr/conf/env.sh /home/mapr/env.sh"
+  clush -Bg $CLUSTERNAME 'echo MFS_HEAPSIZE=$(echo $(grep MemTotal /opt/mapr/conf/meminfofake | tr -s " " | cut -f2 -d " ")/1024/2 | bc) >> /opt/mapr/conf/env.sh'
+
+  # mapr-single may be laying down a bogus mapr-clusters.conf wity cluster name my.clusters.conf secure=false.  clean it up
+  clush -Bg $CLUSTERNAME "rm -f /opt/mapr/conf/mapr-clusters.conf"
+
+  clush -Bg $CLUSTERNAME "/opt/mapr/server/configure.sh -C ${cldbList} -Z ${zookeeperList} $configureClusterOpt -F /home/mapr/disks.txt -disk-opts FW1 -no-autostart"
+
+  # Workaround Bug 31729 that incorrectly comments out mfs.heapsize.percent effectively reducing it from 35% to 20%
+  clush -Bg $CLUSTERNAME "sed -i -e 's/^#service.command.mfs.heapsize.percent=/service.command.mfs.heapsize.percent=/g' /opt/mapr/conf/warden.conf"
+
+  clush -Bg $CLUSTERNAME "cp /home/mapr/env.sh /opt/mapr/conf/env.sh "
+
+  # Configure client
+  clush -Bg client "/opt/mapr/server/configure.sh -c -C ${cldbList} -Z ${zookeeperList} $configureClusterOpt" 
+
+  # Disable central config
+  clush -Bg $CLUSTERNAME "sed -i -e 's/centralconfig.enabled=true/centralconfig.enabled=false/' /opt/mapr/conf/warden.conf"
+set +x
+}
+
+configure_yarn()
+{
+  verbose "=== ${FUNCNAME[0]} $@ ==="
+  [[ -z $(nodeset -e @resourcemanager) ]] && warn "Resource manager not installed.  Not configuring YARN." && return
+  [[ -z $(nodeset -e @nodemanager) ]] && warn "Node manager(s) not installed.  Not configuring YARN." && return
+
+  propertiesFile=/home/mapr/yarn-site-properties.xml
+
+  # Enable log aggregation
+  echo "  <property>"                                 >  $propertiesFile
+  echo "    <name>yarn.log-aggregation-enable</name>" >> $propertiesFile
+  echo "    <value>true</value>"                      >> $propertiesFile
+  echo "  </property>"                                >> $propertiesFile
+
+  # Configure historyserver if it is installed (just grab one.  Can there be more for HA?)
+  historyServer=$(nodeset -e @historyserver | cut -f 1 -d ' ')
+
+  if [[ -n $historyServer ]] ; then
+    echo "  <property>"                                 >>  $propertiesFile
+    echo "    <name>yarn.log.server.url</name>"         >> $propertiesFile
+    if $SECURE ; then
+      echo "    <value>https://${historyServer}:19890/jobhistory/logs</value>"   >> $propertiesFile
+    else
+      echo "    <value>http://${historyServer}:19888/jobhistory/logs</value>"    >> $propertiesFile
+    fi
+    echo "  </property>"                                >> $propertiesFile
+  fi
+
+  destPropertiesFile=/tmp/$(basename $propertiesFile)
+  clush -c -g nodemanager -g resourcemanager $propertiesFile --dest $destPropertiesFile
+
+  clush -B -g nodemanager -g resourcemanager \
+    "confFile=\$(find /opt/mapr/hadoop/hadoop*/etc/hadoop -name yarn-site.xml); \
+     let insertLine=\$(sed -n '/^<\/configuration>/=' \$confFile)-1 ; \
+     sed -i \"\${insertLine}r $destPropertiesFile\" \$confFile "
+
+  ! $SECURE && clush -g nodemanager 'echo "export MAPR_IMPERSONATION_ENABLED=1" >> $(find /opt/mapr/hadoop/hadoop*/etc/hadoop -name yarn-env.sh)'
+}
+
+configure_heap_size()
+{
+  # For services with a configuration file in /opt/mapr/conf/conf.d/warden.servicename.conf, configure heap size
+  # configure_heap_size service_name minMB [ maxMB [ percent ] ]
+  # minMB <= maxMB
+  # if minMB = maxMB = 0, set percentage only and leave min and max unmodified
+
+  verbose "=== ${FUNCNAME[0]} $@ ==="
+
+  serviceName=$1
+  minMB=$2
+  maxMB=$3
+  percent=$4
+  [[ -z $serviceName ]] && warn "Missing arg1 serviceName" && return 1
+  [[ -z $minMB ]] && warn "Missing arg2 minMB" && return 1
+  [[ ! "$minMB" = +([0-9]) ]] && warn "Non-numeric minMB $minMB" && return 1
+  [[ -z $maxMB ]] && maxMB=$minMB
+  [[ ! "$maxMB" = +([0-9]) ]] && warn "Non-numeric maxMB $maxMB" && return 1
+  [[ $maxMB -eq 0 ]] && [[ $minMB -eq 0 ]] && [[ -z $percent ]] && warn "minMB and maxMB both 0 with no percentage specified - settings unchanged" && return 1
+  [[ $minMB -gt $maxMB ]] && warn "minMB $minMB must be greater than or equal to maxMB $maxMB" && return 1
+
+  clushGroup=$serviceName
+  [[ $clushGroup = webserver ]] && serviceName=apiserver        # webserver conf is in warden.apiserver.conf at introduction of apiserver
+
+  [[ -z $(nodeset -e @$clushGroup) ]] && warn "No clush group $clushGroup" && return 1
+
+  confFile=/opt/mapr/conf/conf.d/warden.$serviceName.conf
+
+  # -S return highest return code of commands executed remotely, otherwise clush returns 0 because it didn't fail
+  # -q quiet
+  # -N don't print hostname (-q might do this anyway?)
+  clush -Sq -g $clushGroup -N --pick=1 "[[ -f $confFile ]]" ||  warn "$confFile does not exist.  Heap size not modified for $serviceName"
+
+  [[ $maxMB -gt 0 ]] && clush -Bg $clushGroup \
+      " if grep '^service.heapsize.min=' $confFile > /dev/null 2>&1 ; then \
+          sed -i -e 's/service.heapsize.min=.*$/service.heapsize.min=$minMB/' $confFile ; \
+        else \
+          echo 'service.heapsize.min=$minMB' >> $confFile ; \
+        fi ; \
+        if grep '^service.heapsize.max=' $confFile > /dev/null 2>&1 ; then \
+          sed -i -e 's/service.heapsize.max=.*$/service.heapsize.max=$maxMB/' $confFile ; \
+        else \
+          echo 'service.heapsize.max=$maxMB' >> $confFile ; \
+        fi ; \
+      "
+
+  if [[ -n $percent ]] ; then
+    [[ ! "$percent" = +([0-9]) ]] && warn "Non-numeric percent $percent" && return 1
+    [[ $percent -gt 100 ]] && warn "Invalid heap percent $percent greater than 100" && return 1
+    clush -Bg $clushGroup \
+      " if grep '^service.heapsize.percent=' $confFile > /dev/null 2>&1 ; then \
+          sed -i -e 's/service.heapsize.percent=.*$/service.heapsize.percent=$percent/' $confFile ; \
+        else \
+          echo 'service.heapsize.percent=$percent' >> $confFile ; \
+        fi ; \
+      "
+  fi
+}
+
+configure_drill()
+{
+  # Reduce memory of drill and some other services so we can fit everything in the limited container memory
+  [[ -z $(nodeset -e @drill) ]] && return 0
+  verbose "=== ${FUNCNAME[0]} $@ ==="
+  DRILL_CONF=/opt/mapr/conf/conf.d/warden.drill-bits.conf
+  clush -Bg $CLUSTERNAME "[[ -f $DRILL_CONF ]] && \
+                            sed -i -e '/^service.heapsize.min=/d' -e '/^service.env=/d' $DRILL_CONF && \
+                            printf '%s\n%s' service.heapsize.min=4096 service.env=DRILLBIT_MAX_PROC_MEM=4G >> $DRILL_CONF"
+  clush -Bg drill 'DRILL_ENV=$(find /opt/mapr/drill -name drill-env.sh | tail -1); \
+                   echo "export DRILL_HEAP=1024M" >> $DRILL_ENV; \
+                   echo "export DRILL_MAX_DIRECT_MEMORY=1948M" >> $DRILL_ENV '
+
+  # Reduce OS to 2% from default 10%.  Min is always 256M which is more than enough for docker containers
+  clush -Bg drill 'sed -i -e "s/service.command.os.heapsize.percent=.*$/service.command.os.heapsize.percent=2/" /opt/mapr/conf/warden.conf'
+
+  # Reduce apiserver to 512MB from default 1000MB
+  configure_heap_size webserver 512
+
+  # Reduce opentsdb to 1000MB from default 2000MB
+  configure_heap_size opentsdb 1000
+
+  # Reduce resourcemanager from 10% to 3%
+  configure_heap_size resourcemanager 0 0 3
+}
+
+setup_credentials_old()
+{
+#KDCHN - hostname for kdc to ssh into and create principals for users (root, user1)
+# Distribution of tickets requires proper clush grouping - currently -a
+  verbose "=== ${FUNCNAME[0]} $@ ==="
+  userList="$@"
+
+  if $KERB; then
+    # Add principals for all users.  Password is same as user name.
+    for U in $userList ; do
+      sshpass -p "mapr" ssh $SSHOPTS $KDCHN kadmin -p mapr/admin -w mapr -q "\"addprinc -pw $U $U\""
+    done
+
+    # Username is password
+    for U in $userList ; do
+      #clush -B -g $CLUSTERNAME -g client "su $U -c \"echo $U | /usr/bin/kinit\""
+      # Do a maprlogin kerberos to ensure a MapR ticket is available (output of first maprcli command in rackem() will say something like "getting MapR ticket")
+      clush -B -g $CLUSTERNAME -g client "su $U -c \"echo $U | /usr/bin/kinit; maprlogin kerberos\""
+# /tmp is bad ticket file location.  Docker layer for /tmp is ephemeral and lost on container restart.  Using /var/tmp
+#      clush -aB "su - $U -c \"echo uid=\$(id -u) $(uid -r)\"" 
+#      clush -aB "su $U -c \"echo $U | /usr/bin/kinit; \
+#                 export MAPR_TICKETFILE_LOCATION=/var/tmp/maprticket_\$(id -u); \
+#                 cp /tmp/krb5cc_\$(id -u) /var/tmp;  \
+#		 echo export MAPR_TICKETFILE_LOCATION=/var/tmp/maprticket_\$(id -u) >> ~/.bashrc ; \
+#		 maprlogin kerberos\""
+    done
+
+    # Generate and distribute tickets
+  elif $MAPRSEC; then
+    sshpass -p "mapr" ssh $SSHOPTS $clusterNode 'echo mapr | maprlogin password' || errexit "User root unable to maprlogin on $clusterNode" 
+    for U in $userList ; do
+      USERID=$(sshpass -p "mapr" ssh $SSHOPTS $clusterNode id -u $U ) || errexit "Unable to get $U uid" 
+      sshpass -p "mapr" ssh $SSHOPTS $clusterNode maprlogin generateticket -type service -user $U -out /tmp/maprticket_$USERID || errexit "Unable to generate $U service ticket" 
+      sshpass -p "mapr" ssh $SSHOPTS $clusterNode clush -c -g client -g $CLUSTERNAME /tmp/maprticket_$USERID || errexit "Unable to distribute $U service ticket" 
+      sshpass -p "mapr" ssh $SSHOPTS $clusterNode clush -B -g client -g $CLUSTERNAME chown $U:$U /tmp/maprticket_$USERID || errexit "Unable to set permissions on $U service ticket" 
+    done
+  fi
+}
+
+setup_credentials()
+{
+#KDCHN - hostname for kdc to ssh into and create principals for users (root, user1)
+# Distribution of tickets requires proper clush grouping - currently -a
+  verbose "=== ${FUNCNAME[0]} $@ ==="
+  userList="$@"
+
+  if $KERB; then
+    # Add principals for all users.  Password is same as user name.
+    for U in $userList ; do
+      sshpass -p "mapr" ssh $SSHOPTS $KDCHN kadmin -p mapr/admin -w mapr -q "\"addprinc -pw $U $U\""
+    done
+
+    # Username is password
+    for U in $userList ; do
+      #clush -B -g $CLUSTERNAME -g client "su $U -c \"echo $U | /usr/bin/kinit\""
+      # Do a maprlogin kerberos to ensure a MapR ticket is available (output of first maprcli command in rackem() will say something like "getting MapR ticket")
+      clush -B -g $CLUSTERNAME -g client "su - $U -c \"echo $U | /usr/bin/kinit; maprlogin kerberos\""
+      perm_ticket $U
+    done
+
+    # Generate and distribute tickets
+  elif $MAPRSEC; then
+    sshpass -p "mapr" ssh $SSHOPTS $clusterNode 'echo mapr | maprlogin password' || errexit "User root unable to maprlogin on $clusterNode" 
+    for U in $userList ; do
+      USERID=$(sshpass -p "mapr" ssh $SSHOPTS $clusterNode id -u $U ) || errexit "Unable to get $U uid" 
+      #sshpass -p "mapr" ssh $SSHOPTS $clusterNode maprlogin generateticket -type service -user $U -out /tmp/maprticket_$USERID || errexit "Unable to generate $U service ticket" 
+      #sshpass -p "mapr" ssh $SSHOPTS $clusterNode clush -c -g client -g $CLUSTERNAME /tmp/maprticket_$USERID || errexit "Unable to distribute $U service ticket" 
+      #sshpass -p "mapr" ssh $SSHOPTS $clusterNode clush -B -g client -g $CLUSTERNAME chown $U:$U /tmp/maprticket_$USERID || errexit "Unable to set permissions on $U service ticket" 
+      perm_ticket $U
+    done
+  fi
+}
+
+wait_for_cldb()
+{
+  verbose "=== ${FUNCNAME[0]} $@ ==="
+  CLDBMODE=$1
+  [[ -z $CLDBMODE ]] && CLDBMODE=MASTER_READ_WRITE
+  GREPSTR="-e $CLDBMODE"
+  # CLDB may proceed throught MASTER_REGISTER_READY and go straight to MASTER_READ_WRITE
+  # If MASTER_REGISTER_READY is requested, accept MASTER_READ_WRITE mode also
+  [[ $CLDBMODE == MASTER_REGISTER_READY ]] && GREPSTR+=" -e MASTER_READ_WRITE"
+  CURL_OPTS="-s -k"
+  if $SECURE ; then 
+    CLDB_URL="https://CLDB:7443/login.jsp"
+    CURL_OPTS+=" --data Username=mapr&Password=mapr --cookie-jar /tmp/cookiejar -L"
+  else 
+    CLDB_URL=http://CLDB:7221/cldb.jsp
+  fi
+  # Wait for MapR CLDB
+  SLEEPSECS=15
+  RETRIES=20
+  ATTEMPT=0
+  
+  echo -n "Waiting $(echo $SLEEPSECS*$RETRIES | bc) seconds for CLDB mode $CLDBMODE.  Checking every $SLEEPSECS seconds"
+  while true; do 
+    let ATTEMPT+=1
+    for nextCldb in $(clush -N -g $cldbGroup hostname -f) ; do
+      if curl $CURL_OPTS ${CLDB_URL/CLDB/$nextCldb} | grep -i $GREPSTR > /dev/null ; then 
+        echo ""
+        echo "CLDB at $nextCldb running in mode $CLDBMODE"
+        break 2
+      # 6.1 bug:  Login at login.jsp creates cookie correctly but doesn't redirect correctly to cldb.jsp
+      #           Try getting cldb.jsp using the cookie
+      elif [[ -f /tmp/cookiejar ]]; then
+        CLDB_H_URL=${CLDB_URL/CLDB/$nextCldb}
+	CLDB_H_URL=${CLDB_H_URL/login/cldb}
+        if curl -s -k --cookie /tmp/cookiejar $CLDB_H_URL | grep -i $GREPSTR > /dev/null ; then
+          echo ""
+          echo "CLDB at $nextCldb running in mode $CLDBMODE"
+          break 2
+	fi
+      fi
+    done
+    if [[ $ATTEMPT -ge $RETRIES ]]; then 
+      echo ""
+      errexit "CLDB mode $CLDBMODE not entered after $ATTEMPT checks in $(echo $SLEEPSECS*$ATTEMPT | bc ) seconds"
+    fi 
+    echo -n "."
+    sleep $SLEEPSECS
+  done
+
+  # Shut down non master CLDBs to get around bug 30815
+  # Catch-22.  Having slave CLDBs that aren't licensed prevents me from getting a ticket if I hit them.
+  # But I need a ticket to maprcli to shut them down.
+
+  cldbMaster=${nextCldb%%.*}
+  slaveCldbs=""
+  for nextCldb in $(nodeset -e @cldb); do
+    [[ $nextCldb = $cldbMaster ]] && continue
+    slaveCldbs+=" $(ssh $SSHOPTS $nextCldb hostname -f)"
+  done
+  # Can't seem to shut these down any more (6.0? 6.0.1?)  Add zkconnect
+  if [[ ! -z $slaveCldbs ]] ; then
+    setup_credentials root
+    echo "Shut down slave CLDBs" 
+    sshpass -p "mapr" ssh $SSHOPTS $cldbMaster "maprcli node services -zkconnect $zookeeperList -cldb stop -nodes $slaveCldbs"
+  fi
+}
+
+wait_for_mapr_cluster()
+{
+  verbose "=== ${FUNCNAME[0]} $@ ==="
+  # Pick a random webserver
+  webServer=$(clush -N -g $webserverGroup --pick=1 hostname -f 2> /dev/null)
+  [[ -z $webServer ]] && errexit "No webserver specified.  Cannot use REST calls to verify cluster is up."
+  numberOfNodes=$(clush -N -g $CLUSTERNAME hostname -f | wc -l)
+
+  # Wait for all MapR nodes to start
+  SLEEPSECS=5
+  RETRIES=120
+  ATTEMPT=0
+  echo -n "Waiting $(echo $SLEEPSECS*$RETRIES | bc) seconds for all $numberOfNodes nodes to start.  Checking every $SLEEPSECS seconds. Nodes started: "
+  while true; do 
+    let ATTEMPT+=1
+    # Need to fix mapr MCS login failure.  Use root for now.
+    #curl -s -k -u root:mapr https://$webServer:8443/rest/dashboard/info?-json > /tmp/dashboard.json
+    curl -s -k -u mapr:mapr https://$webServer:8443/rest/dashboard/info?-json > /tmp/dashboard.json
+    NODESUSED=$(jq '.data[].cluster.nodesUsed' /tmp/dashboard.json )
+    [[ -z $NODESUSED ]] && NODESUSED=0
+    if [[ $NODESUSED -eq $numberOfNodes ]] ; then
+      echo " $NODESUSED"
+      break
+    fi
+    if [[ $ATTEMPT -gt $RETRIES ]]; then 
+      echo ""
+      errexit "Cluster not started after $ATTEMPT checks in $(echo $SLEEPSECS*$ATTEMPT | bc ) seconds"
+    fi 
+    echo -n " $NODESUSED"
+    sleep $SLEEPSECS
+  done
+  echo ""
+  verbose "SUCCESS:  MapR Control System GUI accessible at https://${webServer}:8443 using browser proxy ${dockerHost}:3128"
+  echo ""
+  if [[ ! -z $AWS_CFT_MAPR_URL ]] ; then
+    echo -n '{"Status" : "SUCCESS", "Reason" : "Started MapR cluster", "UniqueId" : "MCSGUI", "Data" : "' > /tmp/awsMaprURL.json
+    echo -n "MapR Control System GUI accessible at https://${webServer}:8443 using browser proxy ${dockerHost}:3128" >> /tmp/awsMaprURL.json
+    echo '" }' >> /tmp/awsMaprURL.json
+    curl -T /tmp/awsMaprURL.json "$AWS_CFT_MAPR_URL"
+  fi
+}
+
+start_cluster()
+{
+# Clush start zookeepers
+# Clush start CLDBs
+# Clush start warden everywhere else
+  verbose "=== ${FUNCNAME[0]} $@ ==="
+  SLEEPSECS=5
+  RETRIES=20
+  ATTEMPT=0
+
+  echo "Starting zookeeper(s)"
+  clush -g $zookeeperGroup systemctl start mapr-zookeeper
+  while true; do
+    let ATTEMPT+=1
+    mapfile -t zkArr < <(clush -g $zookeeperGroup 'echo srvr | nc localhost 5181 | grep Mode' | sort )
+    for nextZookeeper in "${zkArr[@]}"; do
+      if [[ ${nextZookeeper##* } == "leader" ]] || [[ ${nextZookeeper##* } == "standalone" ]] ; then
+        printf '%s\n' "${zkArr[@]}"
+	break 2
+      fi
+    done
+    if [[ $ATTEMPT -ge $RETRIES ]]; then
+      errexit "Zookeeper not started after $ATTEMPT checks in $(echo $SLEEPSECS*$ATTEMPT | bc ) seconds"
+    fi
+    sleep $SLEEPSECS
+  done
+
+  # Start CLDB
+  clush -g $cldbGroup systemctl start mapr-warden
+
+  wait_for_cldb MASTER_READ_WRITE 
+
+  # Start remaining nodes
+  clush -g $CLUSTERNAME -X cldb systemctl start mapr-warden
+}
+
+install_license()
+{
+  verbose "=== ${FUNCNAME[0]} $@ ==="
+  sshpass -p "mapr" ssh $SSHOPTS $clusterNode 'curl -o license.txt "http://alerner:alerner4mapr!@stage.mapr.com/license/LatestDemoLicense-M7.txt"'
+  sshpass -p "mapr" ssh $SSHOPTS $clusterNode 'maprcli license add -license license.txt -is_file true'
+}
+
+setup_security()
+{
+  # NOTE TBD:  ES and OT may require a ticket in place before successful installation.  May have to install these after cluster is up?
+  $SECURE || return
+
+  verbose "=== ${FUNCNAME[0]} $@ ==="
+
+  cldbNode=$(clush -N -g $cldbGroup --pick=1 hostname -f 2> /dev/null)
+
+  CONF_OPTS=""
+
+  if $KERB; then
+    # Create CLDB principal and keytab file.  Distribute keytab file to all CLDBs. 
+    until sshpass -p "mapr" ssh $SSHOPTS $KDCHN kadmin -p mapr/admin -w mapr -q "\"addprinc -randkey mapr/$CLUSTERNAME\"" ; do
+      # Putting in this loop because I'm getting this error on the first kadmin call.  Subsequent seem fine.
+      # kadmin: GSS-API (or Kerberos) error while initializing kadmin interface
+      echo -n "."
+      sleep 1
+    done
+    sshpass -p "mapr" ssh $SSHOPTS $KDCHN kadmin -p mapr/admin -w mapr -q "\"ktadd -k /tmp/mapr.keytab mapr/$CLUSTERNAME\""
+    sshpass -p "mapr" scp $SSHOPTS -pr $KDCHN:/tmp/mapr.keytab /tmp 
+    chmod 400 /tmp/mapr.keytab; chown mapr:mapr /tmp/mapr.keytab
+    clush -cg cldb /tmp/mapr.keytab --dest /opt/mapr/conf/mapr.keytab
+    printf -v CONF_OPTS '%s %s "mapr/%s@%s"' '-K' '-P' $CLUSTERNAME $KERB_REALM
+
+
+  fi
+
+  #   1. Generate and distribute security config files
+  
+  # If configure.sh command is still running (disk setup) from container initscript, it will fail.  Retry every 30 seconds.
+  # But remove ssl_keystore and ssl_truststore first.  If a webserver, they were created at webserver installation and will cause configure.sh to fail forever.
+  SECURITY_CONF_FILES="/opt/mapr/conf/ssl_keystore /opt/mapr/conf/ssl_truststore /opt/mapr/conf/maprserverticket /opt/mapr/conf/cldb.key"
+  sshpass -p "mapr" ssh $SSHOPTS $cldbNode "/bin/rm -rf $SECURITY_CONF_FILES"
+  sshpass -p "mapr" ssh $SSHOPTS $cldbNode \
+    "until /opt/mapr/server/configure.sh -secure -genkeys $CONF_OPTS -C $cldbList -Z $zookeeperList $configureClusterOpt -no-autostart ; do sleep 30; /bin/rm -rf $SECURITY_CONF_FILES ; done"
+  /bin/rm -rf /tmp/maprsecureconf; mkdir /tmp/maprsecureconf
+  #sshpass -p "mapr" scp $SSHOPTS -pr \
+  #  "$cldbNode:/opt/mapr/conf/{cldb.key,maprserverticket,ssl_keystore,ssl_truststore}" /tmp/maprsecureconf/
+  # TBD:  determine which security files are required on non cldb nodes and client nodes.  Only distribute required files.
+  sshpass -p "mapr" ssh $SSHOPTS $cldbNode "clush -c -g $CLUSTERNAME -g client /opt/mapr/conf/{cldb.key,maprserverticket,ssl_keystore,ssl_truststore}"
+  clush -B -g $CLUSTERNAME -g client "chown mapr:mapr /opt/mapr/conf/{cldb.key,maprserverticket,ssl_keystore,ssl_truststore}"
+
+  #   2. Configure remaining nodes for security
+  if $KERB; then
+    # Configure nodes to use KDC 
+    sshpass -p "mapr" scp $SSHOPTS $KDCHN:/etc/krb5.conf /tmp/krb5.conf
+    clush -c -g $CLUSTERNAME -g client  /tmp/krb5.conf --dest /etc/krb5.conf
+    #clush -B -g $CLUSTERNAME -g client "sed -i -e 's/EXAMPLE.COM/$KERB_REALM/g' -e's/kerberos.example.com/$KDCHN/g' -e 's/example.com/$DOMAIN/g' /etc/krb5.conf"
+    #sshpass -p "mapr" ssh $SSHOPTS ${ip} sed -i -e "\"s/EXAMPLE.COM/$KERB_REALM/g\"" -e"\"s/kerberos.example.com/$KDCHN/g\"" -e "\"s/example.com/$DOMAIN/g\"" /etc/krb5.conf
+  fi
+
+  clush -B -g $CLUSTERNAME -x $cldbNode "until /opt/mapr/server/configure.sh -secure $CONF_OPTS -C $cldbList -Z $zookeeperList $configureClusterOpt  -no-autostart ; do sleep 30 ; done"
+  clush -Bg client "/opt/mapr/server/configure.sh -c -secure $CONF_OPTS -C ${cldbList} -Z ${zookeeperList} $configureClusterOpt" 
+}
+
+setup_kdc()
+{
+  verbose "=== ${FUNCNAME[0]} $@ ==="
+  cat <<-EOF > /tmp/setup_kdc.sh
+  #!/bin/bash
+  cp /etc/krb5.conf /tmp/krb5.conf
+  cp /var/kerberos/krb5kdc/kdc.conf /tmp/kdc.conf
+  cp /var/kerberos/krb5kdc/kadm5.acl /tmp/kadm5.acl
+  sed -c -i -e "s/EXAMPLE.COM/$KERB_REALM/g" -e"s/kerberos.example.com/$KDCHN/g" -e "s/example.com/$DOMAIN/g" /etc/krb5.conf
+  sed -c -i -e "s/EXAMPLE.COM/$KERB_REALM/g" /var/kerberos/krb5kdc/kdc.conf
+  /usr/sbin/kdb5_util -P mapr create -s
+  sed -c -i -e "s/EXAMPLE.COM/$KERB_REALM/g" /var/kerberos/krb5kdc/kadm5.acl
+  /usr/sbin/kadmin.local -q "addprinc -pw mapr mapr/admin"
+  /sbin/service krb5kdc start
+  /sbin/service kadmin start
+  until /sbin/service kadmin status; do
+    sleep 1
+    echo -n .
+  done
+	EOF
+  chmod +x /tmp/setup_kdc.sh
+  sed -c -i -e "s/^ *//" /tmp/setup_kdc.sh
+  sshpass -p "mapr" scp $SSHOPTS -pr /tmp/setup_kdc.sh $KDCHN:/tmp/setup_kdc.sh
+  sshpass -p "mapr" ssh $SSHOPTS $KDCHN /tmp/setup_kdc.sh
+}
+
+configure_monitoring() {
+  verbose "=== ${FUNCNAME[0]} $@ ==="
+  opentsdbList=""
+  OTConfigArg=""
+  for opentsdbHost in $(clush -g $CLUSTERNAME ls /opt/mapr/roles/opentsdb 2>/dev/null | cut -f1 -d':'); do
+    opentsdbList+=$(ssh $opentsdbHost hostname -f),
+  done
+  if [[ -z $opentsdbList ]] ; then
+    warn "No OpenTSDB Servers specified.  MapR Metric Monitoring not enabled."
+  else
+    opentsdbList=${opentsdbList%,}
+    OTConfigArg="-OT $opentsdbList"
+  fi
+
+  elasticsearchList=""
+  ESConfigArg=""
+  for elasticsearchHost in $(clush -g $CLUSTERNAME ls /opt/mapr/roles/elasticsearch 2>/dev/null | cut -f1 -d':'); do
+    elasticsearchList+=$(ssh $elasticsearchHost hostname -f),
+  done
+  if [[ -z $elasticsearchList ]] ; then
+    warn "No Elasticsearch Servers specified.  MapR Log Monitoring not enabled."
+  else
+    elasticsearchList=${elasticsearchList%,}
+    ESConfigArg="-ES $elasticsearchList"
+  fi
+
+  if [[ ! -z $ESConfigArg ]] || [[ ! -z $OTConfigArg ]] ; then
+    clush -Bg $CLUSTERNAME "/opt/mapr/server/configure.sh -R $ESConfigArg $OTConfigArg $configureClusterOpt" 
+  fi
+
+  # Workaround Bug 31729 that incorrectly comments out mfs.heapsize.percent effectively reducing it from 35% to 20%
+  clush -Bg $CLUSTERNAME "sed -i -e 's/^#service.command.mfs.heapsize.percent=/service.command.mfs.heapsize.percent=/g' /opt/mapr/conf/warden.conf"
+
+}
+
+monitoring_stream_ttl_days()
+{
+  verbose "=== ${FUNCNAME[0]} $@ ==="
+  daysTTL=${1:-3}
+  let secondsTTL=86400*$daysTTL
+
+  SLEEPSECS=3
+  RETRIES=40
+  ATTEMPT=0
+  if [[ $maprCoreVersion == 5* || $maprCoreVersion == 6.0* ]] ; then
+    echo -n "Waiting $(echo $SLEEPSECS*$RETRIES | bc) seconds for Monitoring Streams.  Checking every $SLEEPSECS seconds"
+    while true; do
+      let ATTEMPT+=1
+      if hadoop fs -ls /var/mapr/mapr.monitoring/streams/0 > /dev/null 2>&1 && \
+         hadoop fs -ls /var/mapr/mapr.monitoring/streams/1 > /dev/null 2>&1 ; then
+        break
+      fi
+      if [[ $ATTEMPT -ge $RETRIES ]]; then
+        echo ""
+        echo "Monitoring Streams still not present after $ATTEMPT checks in $(echo $SLEEPSECS*$ATTEMPT | bc ) seconds.  Leaving default TTL on streams."
+        return
+      fi
+      echo -n "."
+      sleep $SLEEPSECS
+    done
+    echo ""
+  
+    for monitoringStream in 0 1; do
+      sshpass -p mapr ssh $SSHOPTS mapr@$clusterNode maprcli stream edit -ttl $secondsTTL -path /var/mapr/mapr.monitoring/streams/$monitoringStream
+      sshpass -p mapr ssh $SSHOPTS mapr@$clusterNode "maprcli stream info -json -path /var/mapr/mapr.monitoring/streams/$monitoringStream | grep ttl"
+    done
+  else # At 6.1 monitoring streams path changes and only one stream is used
+    echo -n "Waiting $(echo $SLEEPSECS*$RETRIES | bc) seconds for Monitoring Stream.  Checking every $SLEEPSECS seconds"
+    while true; do
+      let ATTEMPT+=1
+      if hadoop fs -ls /var/mapr/mapr.monitoring/metricstreams/0 > /dev/null 2>&1 ; then
+        break
+      fi
+      if [[ $ATTEMPT -ge $RETRIES ]]; then
+        echo ""
+        echo "Monitoring Stream still not present after $ATTEMPT checks in $(echo $SLEEPSECS*$ATTEMPT | bc ) seconds.  Leaving default TTL on stream."
+        return
+      fi
+      echo -n "."
+      sleep $SLEEPSECS
+    done
+    echo ""
+  
+    sshpass -p mapr ssh $SSHOPTS mapr@$clusterNode maprcli stream edit -ttl $secondsTTL -path /var/mapr/mapr.monitoring/metricstreams/0
+    sshpass -p mapr ssh $SSHOPTS mapr@$clusterNode "maprcli stream info -json -path /var/mapr/mapr.monitoring/metricstreams/0 | grep ttl"
+  fi
+}
+
+wait_for_mount()
+{
+  verbose "=== ${FUNCNAME[0]} $@ ==="
+  MNTDIR=$1
+  [[ -z $MNTDIR ]] && MNTDIR="/"
+  webServer=$(clush -N -g $webserverGroup --pick=1 hostname -f 2> /dev/null)
+  [[ -z $webServer ]] && errexit "No webserver specified.  Cannot use REST calls."
+  SLEEPSECS=5
+  RETRIES=40
+  ATTEMPT=0
+  echo -n "Waiting $(echo $SLEEPSECS*$RETRIES | bc) seconds for MapR volume mounted at $MNTDIR.  Checking every $SLEEPSECS seconds"
+  createVol=false
+  while true; do
+    let ATTEMPT+=1
+    if sshpass -p "mapr" ssh $SSHOPTS $webServer "hadoop fs -test -e $MNTDIR" ; then
+      if curl -s -k -u root:mapr https://$webServer:8443/rest/volume/list?-columns=volumename | \
+        jq -r '.data[].mountdir' | \
+        grep -q "^${MNTDIR}$" ; then
+        echo ""
+        echo "MapR volume is mounted at $MNTDIR"
+        break
+      elif sshpass -p "mapr" ssh $SSHOPTS $webServer "hadoop fs -test -d $MNTDIR" ; then
+        echo ""
+        echo "WARNING: $MNTDIR directory exists but is not a MapR volume mount point.  Continue using $MNTDIR in parent volume."
+        #echo "WARNING: $MNTDIR directory exists but is not a MapR volume mount point.  Re-creating as MapR volume."
+        #createVol=true
+        break
+      else
+        errexit "$MNTDIR exists but is not a directory."
+        echo "WARNING: $MNTDIR exists but is not a directory.  Deleting and re-creating as MapR volume."
+        # createVol=true
+        break
+      fi
+    fi
+    if [[ $ATTEMPT -ge $RETRIES ]]; then
+      echo ""
+      echo "MapR volume still not mounted at $MNTDIR after $ATTEMPT checks in $(echo $SLEEPSECS*$ATTEMPT | bc ) seconds"
+      echo "WARNING: If $MNTDIR directory exists, it is in root volume.  Was $MNTDIR created before MapR createsystemvolumes completed?"
+      return
+    fi
+    echo -n "."
+    sleep $SLEEPSECS
+  done
+  if $createVol; then
+    echo "NEED TO CREATE VOLUME at $MNTDIR"
+  fi
+}
+
+mount_clients() {
+  verbose "=== ${FUNCNAME[0]} $@ ==="
+  for CLIENT in basic platinum; do
+    if clush -g posix-client-$CLIENT hostname > /dev/null 2>&1; then
+      [[ $MAPRSEC || $KERB ]] && clush -g posix-client-$CLIENT maprlogin generateticket -type servicewithimpersonation -user mapr -out /opt/mapr/conf/maprfuseticket
+      clush -g posix-client-$CLIENT "mkdir /mapr; systemctl enable mapr-posix-client-$CLIENT; systemctl start mapr-posix-client-$CLIENT"
+    fi
+  done
+}

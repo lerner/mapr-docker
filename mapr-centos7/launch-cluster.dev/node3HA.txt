@@ -1,0 +1,4 @@
+0 fileserver nodemanager posix-client-basic
+1 fileserver nodemanager posix-client-basic zookeeper cldb webserver hivemetastore
+2 fileserver nodemanager posix-client-basic zookeeper cldb           hiveserver2     spark-historyserver 
+3 fileserver nodemanager posix-client-basic zookeeper      webserver resourcemanager historyserver

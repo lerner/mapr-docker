@@ -1,0 +1,32 @@
+#/bin/bash
+
+sed -i --copy -e "s/^search/search $DOMAIN/" /etc/resolv.conf
+echo "StrictHostKeyChecking no" >> /root/.ssh/config
+service sshd start
+
+#IP=$(hostname -I)
+#echo "This container IP : ${IP}"
+#
+## /tmp/start-kdc.sh -D $DOMAIN -K $KERB_REALM
+##
+#
+#cp /etc/krb5.conf /tmp/krb5.conf
+#cp /var/kerberos/krb5kdc/kdc.conf /tmp/kdc.conf
+#cp /var/kerberos/krb5kdc/kadm5.acl /tmp/kadm5.acl
+#sed -i -e "s/EXAMPLE.COM/$KERB_REALM/g" -e"s/kerberos.example.com/$(hostname -f)/g" -e "s/example.com/$DOMAIN/g" /etc/krb5.conf
+#sed -i -e "s/EXAMPLE.COM/$KERB_REALM/g" /var/kerberos/krb5kdc/kdc.conf
+#/usr/sbin/kdb5_util -P mapr create -s
+#sed -i -e "s/EXAMPLE.COM/$KERB_REALM/g" /var/kerberos/krb5kdc/kadm5.acl
+#/usr/sbin/kadmin.local -q "addprinc -pw mapr mapr/admin"
+#/sbin/service krb5kdc start
+#/sbin/service kadmin start
+#until /sbin/service kadmin status; do
+#sleep 1
+#echo -n .
+#done
+
+while true
+do
+sleep 3600
+done
+

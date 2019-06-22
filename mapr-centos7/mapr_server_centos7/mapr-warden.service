@@ -1,0 +1,19 @@
+[Unit]
+Description=MapR Technologies, Inc. warden services
+Requires=multi-user.target
+
+[Service]
+ExecStop=/opt/mapr/initscripts/mapr-warden stop
+ExecStart=/opt/mapr/initscripts/mapr-warden start
+ExecReload=/opt/mapr/initscripts/mapr-warden reload
+PIDFile=/opt/mapr/pid/warden.pid
+Restart=on-failure
+RestartSec=10
+StartLimitBurst=3
+StartLimitInterval=60s
+
+SuccessExitStatus=130 143
+Type=forking
+
+[Install]
+WantedBy=default.target
