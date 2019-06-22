@@ -3,7 +3,7 @@ Docker environment to build containers, and run a multi-node MapR cluster on a s
 
 Build docker images
 
-1. In top level directory (./docker-mapr), download CentOS versions of MapR Core and MapR MEPs that will be used for created images.  For example, to build images for MapR 6.0.1 and 6.1 with MEP versions 5.0.3, 6.0.2, 6.1.1, and 6.2.0
+1. In top level directory, download CentOS versions of MapR Core and MapR MEPs that will be used for created images.  For example, to build images for MapR 6.0.1 and 6.1 with MEP versions 5.0.3, 6.0.2, 6.1.1, and 6.2.0
    - curl -O http://package.mapr.com/releases/MEP/MEP-6.2.0/redhat/mapr-mep-v6.2.0.201905272218.rpm.tgz
    - curl -O http://package.mapr.com/releases/MEP/MEP-6.1.1/redhat/mapr-mep-v6.1.1.201905272229.rpm.tgz
    - curl -O http://package.mapr.com/releases/MEP/MEP-6.0.2/redhat/mapr-mep-v6.0.2.201905272240.rpm.tgz
