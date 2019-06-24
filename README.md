@@ -29,4 +29,5 @@ The scripts run a squid web proxy container which provides a mechanism for a rem
 Sat Jun 22 13:49:58 PDT 2019: SUCCESS:  MapR Control System GUI accessible at https://mapr02.mapr.local:8443 using browser proxy ec2-34-210-106-33.us-west-2.compute.amazonaws.com:3128
 ```
 Connect to cluster nodes
+
 All cluster nodes are running ssh with the launcher client node exposing ssh on port 2222.  After successful startup, you'll see an ssh command to log in as root to the client node with password mapr.  From there you can log in to any cluster node with ssh keys that are already installed.  Clush is also configured for use.
